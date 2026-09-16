@@ -36,21 +36,31 @@ export type NetworkSelectorProps = {
   onToggle: () => void;
   /** Whether to close the dropdown after a chain is selected. */
   autoClose?: boolean;
+  /** Optional callback when a chain is selected. */
+  onSelectChain?: (chainId: number) => void;
 };
 
 const SUPPORTED_CHAIN_IDS = SUPPORTED_CHAINS.map((c) => c.id);
 
-export function NetworkSelector({ open, onToggle, autoClose = true }: NetworkSelectorProps) {
+export function NetworkSelector({ open, onToggle, autoClose = true, onSelectChain }: NetworkSelectorProps) {
   const chainId = useActiveChainId();
   const { switchChain } = useSwitchChainHook();
-  const [localChainId, setLocalChainId] = useState<number | undefined>(
-    chainId ?? undefined
-  );
+  const [localChainId, setLocalChainId] = useState<number>(() => {
+    if (chainId) return chainId;
+    const stored = localStorage.getItem('trust_ai_selected_chain');
+    if (stored) {
+      const parsed = parseInt(stored, 10);
+      if (!isNaN(parsed) && CHAIN_NAMES[parsed]) return parsed;
+    }
+    return 11155111; // Sepolia default
+  });
 
   // Sync the local state when wagmi's chain changes (e.g. user switched via
   // wallet popup instead of this selector).
   useEffect(() => {
-    setLocalChainId(chainId ?? undefined);
+    if (chainId) {
+      setLocalChainId(chainId);
+    }
   }, [chainId]);
 
   // Close the dropdown when clicking outside.
@@ -68,16 +78,28 @@ export function NetworkSelector({ open, onToggle, autoClose = true }: NetworkSel
   }, [open, onToggle]);
 
   const handleSelectChain = async (id: number) => {
+    setLocalChainId(id);
+    localStorage.setItem('trust_ai_selected_chain', id.toString());
+    onSelectChain?.(id);
+
     try {
+      if (typeof window !== 'undefined' && (window as any).__APP_KIT_INSTANCE?.switchNetwork) {
+        const targetChain = SUPPORTED_CHAINS.find((c) => c.id === id);
+        if (targetChain) {
+          await (window as any).__APP_KIT_INSTANCE.switchNetwork(targetChain);
+        }
+      }
       await switchChain({ chainId: id });
-      if (autoClose) onToggle();
     } catch (err) {
-      console.error('Failed to switch chain:', err);
+      console.warn('Network switch applied locally (wallet prompt optional):', err);
     }
+
+    if (autoClose) onToggle();
   };
 
-  const currentColor = chainId ? CHAIN_COLORS[chainId] ?? '#5c6b7e' : '#5c6b7e';
-  const currentName = chainId ? CHAIN_NAMES[chainId] ?? 'Unknown' : 'No chain';
+  const activeDisplayId = chainId ?? localChainId;
+  const currentColor = CHAIN_COLORS[activeDisplayId] ?? '#5c6b7e';
+  const currentName = CHAIN_NAMES[activeDisplayId] ?? 'Sepolia';
 
   return (
     <div style={{ position: 'relative', display: 'inline-block' }}>
@@ -148,7 +170,7 @@ export function NetworkSelector({ open, onToggle, autoClose = true }: NetworkSel
           {SUPPORTED_CHAIN_IDS.map((id) => {
             const name = CHAIN_NAMES[id] ?? 'Unknown';
             const color = CHAIN_COLORS[id] ?? '#5c6b7e';
-            const isActive = localChainId === id;
+            const isActive = activeDisplayId === id;
             return (
               <button
                 key={id}

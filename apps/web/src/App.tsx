@@ -1144,7 +1144,7 @@ function AppContent() {
     pair?: string,
     interval?: number,
     tradeAmount?: number,
-    rpc?: { rpcUrl: string; rpcProvider: string; rpcNetwork: string },
+    rpc?: { rpcUrl?: string; rpcProvider?: string; rpcNetwork?: string },
     route?: { v4Fee?: number; v4TickSpacing?: number; v4HooksAddress?: string; v4HookPermissions?: string }
   ) => {
     try {
@@ -1587,6 +1587,20 @@ function AppContent() {
     }
   };
 
+  const handleChainSelected = (newChainId: number) => {
+    const netKeyMap: Record<number, string> = {
+      11155111: 'sepolia',
+      1301: 'unichain-sepolia',
+      130: 'unichain',
+      1: 'mainnet',
+    };
+    const rpcNet = netKeyMap[newChainId];
+    if (rpcNet) {
+      setRpcNetwork(rpcNet);
+      handleUpdateSettings(undefined, undefined, undefined, undefined, undefined, undefined, undefined, { rpcNetwork: rpcNet });
+    }
+  };
+
   return (
     <div style={{ padding: '24px', maxWidth: '1440px', margin: '0 auto' }}>
       {/* Top Navbar */}
@@ -1651,7 +1665,7 @@ function AppContent() {
           </button>
 
           {/* Minimalist Network Selector */}
-          <NetworkSelector open={networkSelectorOpen} onToggle={() => setNetworkSelectorOpen((v) => !v)} autoClose />
+          <NetworkSelector open={networkSelectorOpen} onToggle={() => setNetworkSelectorOpen((v) => !v)} onSelectChain={handleChainSelected} autoClose />
 
           {/* Dedicated Status Pills: Chip (Engine) + Wi-Fi (Network WS) */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>

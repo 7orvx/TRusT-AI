@@ -114,9 +114,8 @@ export const ALCHEMY_API_KEY =
 
 /** Returns the RPC URL for a given chain ID (Alchemy when configured, public fallback otherwise). */
 export function getRpcUrlForChain(chainId: number): string {
-  // When an Alchemy key is configured (and it's not the default fallback),
-  // use Alchemy's endpoints (more reliable rate limits + analytics).
-  const useAlchemy = ALCHEMY_API_KEY && ALCHEMY_API_KEY !== ALCHEMY_KEY_FALLBACK;
+  // When an Alchemy key is available, use Alchemy's endpoints for fast, reliable rate limits.
+  const useAlchemy = Boolean(ALCHEMY_API_KEY);
 
   if (useAlchemy) {
     if (chainId === 11155111) return `https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;

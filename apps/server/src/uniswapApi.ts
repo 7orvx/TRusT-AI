@@ -262,10 +262,27 @@ function getTokenDecimals(address: string): number {
 // orchestrator's REST state uses: the UI-set RPC network via /api/rpc-config,
 // then NETWORK_NAME, then the built-in default. Resolved per request so a late/updated .env is never cached
 // at module load time (desktop sidecar cold starts, dev dotenv flooding later).
-function resolveNetwork(): { net: string; networkLabel: string } {
+function resolveNetwork(trigger?: MarketTrigger): { net: string; networkLabel: string } {
+  // If the trigger is for the Unichain Sepolia mock playground tokens (mUSDC/mUSDT),
+  // force network to 'unichain-sepolia' so calldata is generated for Unichain Sepolia.
+  if (trigger) {
+    const pair = (trigger.pair || '').toUpperCase();
+    const tokenInLower = (trigger.token_in || '').toLowerCase();
+    const tokenOutLower = (trigger.token_out || '').toLowerCase();
+    const isMockTokenIn = tokenInLower === '0xd1f4c92fa1436ab2d110a02df56224ed0a4f5860' || tokenInLower === '0xe05454d256ce63ae75df334ec6e0f1dc3e972e06';
+    const isMockTokenOut = tokenOutLower === '0xd1f4c92fa1436ab2d110a02df56224ed0a4f5860' || tokenOutLower === '0xe05454d256ce63ae75df334ec6e0f1dc3e972e06';
+    if (pair.includes('MUSDC') || pair.includes('MUSDT') || isMockTokenIn || isMockTokenOut) {
+      return { net: 'unichain-sepolia', networkLabel: 'UNICHAIN-SEPOLIA' };
+    }
+  }
+
   const configuredNetwork = rpcConfig && rpcConfig.configured ? rpcConfig.network : undefined;
   const resolvedNetwork = configuredNetwork || (process.env.NETWORK_NAME || 'sepolia');
-  const net = resolvedNetwork.toLowerCase();
+  let net = resolvedNetwork.toLowerCase();
+  // Sepolia testnet does not host Uniswap v4 Universal Router; default testnet v4 routes to unichain-sepolia.
+  if (net === 'sepolia') {
+    net = 'unichain-sepolia';
+  }
   const networkLabel =
     net === 'unichain-sepolia' ? 'UNICHAIN-SEPOLIA' :
       net === 'unichain' ? 'UNICHAIN' :
@@ -441,7 +458,7 @@ export async function getUniswapSwapData(
     tokenOutDecimals
   );
 
-  const { net, networkLabel } = resolveNetwork();
+  const { net, networkLabel } = resolveNetwork(trigger);
 
   // ── v4 route: Universal Router command encoding (the only route) ──────────
   {
