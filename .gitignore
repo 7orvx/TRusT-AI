@@ -18,7 +18,6 @@ apps/server/*.exe
 # Desktop (Tauri) generated artifacts
 apps/desktop/icon-source.png
 apps/desktop/src-tauri/binaries/
-apps/desktop/src-tauri/icons/
 apps/desktop/src-tauri/gen/
 apps/server/sea-config.json
 
