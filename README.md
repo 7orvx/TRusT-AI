@@ -12,6 +12,15 @@ monitoring, a **TypeScript** orchestrator for flexible LLM integration
 (multi-AI provider), and a modern **React** dashboard focused on decision
 transparency, multi-provider AI support, and end-user risk management.
 
+<!-- Preview Screenshots -->
+<p align="center">
+  <img src="./assets/dashboard.png" alt="TRusT-AI Dashboard" width="100%" />
+</p>
+
+<p align="center">
+  <img src="./assets/airpc.png" alt="AI & RPC Provider Configuration" width="100%" />
+</p>
+
 ---
 
 ## 🏛️ System Architecture
