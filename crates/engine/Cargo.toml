@@ -1,0 +1,17 @@
+[package]
+name = "trust-ai-engine"
+version = "0.1.0"
+edition = "2021"
+authors = ["TRusT-AI Team"]
+description = "High-performance Rust execution engine for block monitoring, liquidity analysis, and DEX trade execution"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json"] }
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"

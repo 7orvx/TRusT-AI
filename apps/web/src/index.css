@@ -1,0 +1,853 @@
+:root {
+  --bg-dark: #0f0f0f;
+  --bg-card: #141416;
+  --bg-card-hover: rgba(255, 255, 255, 0.04);
+  --border-color: rgba(255, 255, 255, 0.08);
+  --border-glow: rgba(168, 85, 247, 0.3);
+
+  --text-main: #ffffff;
+  --text-muted: #8a99ad;
+  --text-dim: #5c6b7e;
+
+  --accent-cyan: #38bdf8;
+  --accent-blue: #38ef7d;
+  --accent-green: #10b981;
+  --accent-red: #ff3366;
+  --accent-amber: #f59e0b;
+  --accent-purple: #a855f7;
+  --accent-violet: #a855f7;
+  --accent-magenta: #d946ef;
+  --accent-uniswap: #a855f7;
+
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-dark);
+  background-image:
+    radial-gradient(at 10% 20%, rgba(255, 255, 255, 0.05) 0px, transparent 50%),
+    radial-gradient(at 90% 80%, rgba(157, 78, 221, 0.05) 0px, transparent 50%);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Glassmorphism utility */
+.glass-panel {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  transition: all 0.25s ease-in-out;
+}
+
+.glass-panel:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Main two-column layout: children must be allowed to shrink below their
+   content width (min-width: 0), otherwise long unbreakable content such as
+   swap calldata forces the column wider than 1fr and overflows the page. */
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  min-width: 0;
+}
+
+.main-grid>div {
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .main-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.glow-cyan {
+  box-shadow: 0 0 20px rgba(255, 255, 255, 0.15);
+}
+
+.glow-red {
+  box-shadow: 0 0 20px rgba(255, 51, 102, 0.2);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Badge styles */
+.badge {
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.badge-cyan {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.badge-green {
+  background: rgba(0, 255, 135, 0.12);
+  color: var(--accent-green);
+  border: 1px solid rgba(0, 255, 135, 0.3);
+}
+
+.badge-red {
+  background: rgba(255, 51, 102, 0.12);
+  color: var(--accent-red);
+  border: 1px solid rgba(255, 51, 102, 0.3);
+}
+
+.badge-amber {
+  background: rgba(255, 184, 0, 0.12);
+  color: var(--accent-amber);
+  border: 1px solid rgba(255, 184, 0, 0.3);
+}
+
+/* Pulse animation */
+@keyframes pulse-dot {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+}
+
+.dot-online {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--accent-green);
+  box-shadow: 0 0 10px var(--accent-green);
+  animation: pulse-dot 2s infinite ease-in-out;
+}
+
+.dot-paused {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--accent-red);
+  box-shadow: 0 0 10px var(--accent-red);
+}
+
+/* Compact header pills (infra status, credentials, provider) */
+.header-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 8px 15px;
+  font-size: 0.78rem;
+  color: var(--text-main);
+  white-space: nowrap;
+  transition: border-color 0.2s ease, color 0.2s ease;
+  margin-right: 6px;
+}
+
+.header-pill:last-child {
+  margin-right: 0;
+}
+
+.header-pill:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Looser vertical rhythm for the header so groups of controls breathe. */
+header.glass-panel {
+  padding-top: 24px;
+  padding-bottom: 24px;
+}
+
+/* Provider select inside the pill: hide the native arrow (a ChevronDown is
+   rendered instead) and keep the dropdown list readable on the dark bg. */
+.header-pill select {
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.header-pill select option {
+  background: #151515;
+  color: #f0f4f8;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Spin animation */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ─── SWAP CARD PREMIUM ─── */
+@keyframes neon-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.15), inset 0 0 8px rgba(255, 255, 255, 0.03);
+  }
+
+  50% {
+    box-shadow: 0 0 20px rgba(255, 255, 255, 0.16), inset 0 0 12px rgba(255, 255, 255, 0.04);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% center;
+  }
+
+  100% {
+    background-position: 200% center;
+  }
+}
+
+@keyframes slide-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes check-pop {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+
+  60% {
+    transform: scale(1.2);
+  }
+
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.swap-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 20px;
+  animation: neon-pulse 3s ease-in-out infinite, slide-in-up 0.4s ease-out;
+  position: relative;
+  overflow: hidden;
+}
+
+.swap-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+}
+
+.swap-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.swap-card-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  letter-spacing: 0.3px;
+}
+
+.swap-route-info {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  border-left: 2px solid rgba(255, 255, 255, 0.3);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+.swap-route-info strong {
+  color: var(--text-main);
+}
+
+.swap-btn {
+  width: 100%;
+  padding: 14px 20px;
+  border: none;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  transition: all 0.25s ease;
+  position: relative;
+  overflow: hidden;
+  letter-spacing: 0.3px;
+  background: linear-gradient(135deg, #a855f7 0%, #c084fc 50%, #d946ef 100%);
+  color: #ffffff;
+ 
+}
+
+.swap-btn:hover {
+  transform: translateY(-2px);
+  
+}
+
+.swap-btn:active {
+  transform: translateY(0);
+  
+}
+
+.swap-btn.pending {
+  background: rgba(168, 85, 247, 0.2);
+  color: var(--accent-magenta);
+  cursor: wait;
+  border: 1px solid rgba(217, 70, 239, 0.4);
+  animation: neon-pulse 1.5s ease-in-out infinite;
+}
+
+.swap-btn.pending .btn-spinner {
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-top-color: var(--accent-magenta);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* Spinning refresh icon in the plug-and-play validation feedback rows
+   (Configuration modal — Test Key / Test Connection while probing). */
+.spin-icon {
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+/* Tabbed Navigation in Settings Modal */
+.modal-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 18px;
+  padding-bottom: 2px;
+}
+
+.modal-tab-btn {
+  padding: 8px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 8px 8px 0 0;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+}
+
+.modal-tab-btn:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.modal-tab-btn.active {
+  color: var(--accent-violet);
+  background: rgba(168, 85, 247, 0.08);
+  font-weight: 700;
+}
+
+.modal-tab-btn.active::after {
+  content: '';
+  position: absolute;
+  bottom: -3px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #a855f7, #d946ef);
+  border-radius: 2px;
+}
+
+/* Confidence Bar */
+.confidence-bar-bg {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.confidence-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #a855f7 0%, #d946ef 100%);
+  border-radius: 999px;
+  transition: width 0.4s ease;
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.5);
+}
+
+/* Budget guard strip shown above the swap actions */
+.swap-budget-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 16px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.swap-budget-row strong {
+  color: var(--text-main);
+  font-weight: 700;
+}
+
+/* Row holding the Confirm Swap + Cancel buttons */
+.swap-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.swap-actions .swap-btn {
+  flex: 1 1 240px;
+}
+
+.swap-cancel-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 51, 102, 0.4);
+  background: rgba(255, 51, 102, 0.06);
+  color: var(--accent-red);
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.swap-cancel-btn:hover:not(:disabled) {
+  background: rgba(255, 51, 102, 0.16);
+  border-color: var(--accent-red);
+  transform: translateY(-1px);
+}
+
+.swap-cancel-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Dismissed-signal notice (Cancel) */
+.signal-dismissed {
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.82rem;
+  background: rgba(255, 153, 51, 0.06);
+  border: 1px dashed rgba(255, 153, 51, 0.35);
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.signal-dismissed svg {
+  color: var(--accent-amber);
+  flex-shrink: 0;
+}
+
+.signal-dismissed button {
+  margin-left: auto;
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.signal-dismissed button:hover {
+  border-color: var(--accent-amber);
+  color: var(--accent-amber);
+}
+
+/* Transaction Status Banners */
+.tx-banner {
+  margin-top: 12px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.82rem;
+  animation: slide-in-up 0.3s ease-out;
+}
+
+.tx-banner-success {
+  background: rgba(0, 255, 135, 0.08);
+  border: 1px solid rgba(0, 255, 135, 0.25);
+  color: var(--accent-green);
+}
+
+.tx-banner-success .tx-check-icon {
+  animation: check-pop 0.5s ease-out;
+}
+
+.tx-banner-error {
+  background: rgba(255, 51, 102, 0.08);
+  border: 1px solid rgba(255, 51, 102, 0.25);
+  color: var(--accent-red);
+}
+
+.tx-banner a {
+  color: var(--accent-cyan);
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  transition: color 0.2s;
+}
+
+.tx-banner a:hover {
+  color: #fff;
+}
+
+/* ─── PAIR SELECTOR ─── */
+.pair-selector-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.pair-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.pair-option:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-main);
+}
+
+.pair-option.active {
+  border-color: var(--accent-cyan);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--accent-cyan);
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.1);
+}
+
+.pair-option-icon {
+  font-size: 1.1rem;
+}
+
+/* ─── MANUAL PLAYGROUND TRIGGER (Unichain Sepolia mUSDC/mUSDT) ─── */
+.force-swap-btn {
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px dashed var(--accent-cyan);
+  background: rgba(255, 51, 102, 0.08);
+  color: var(--accent-cyan);
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.force-swap-btn:hover:not(:disabled) {
+  background: rgba(255, 51, 102, 0.16);
+  border-style: solid;
+}
+
+.force-swap-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ─── DEX-STYLE PAIR BUILDER (custom base/quote token picker) ─── */
+.pair-builder {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--border-color);
+}
+
+.pair-token-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-main);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pair-token-btn:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.pair-swap-btn {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--accent-cyan);
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pair-swap-btn:hover {
+  border-color: rgba(255, 255, 255, 0.5);
+  transform: rotate(180deg);
+}
+
+.token-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+/* ─── BADGE PURPLE ─── */
+.badge-purple {
+  background: rgba(157, 78, 221, 0.12);
+  color: var(--accent-purple);
+  border: 1px solid rgba(157, 78, 221, 0.3);
+}
+
+/* ─── RANGE SLIDER CUSTOM ─── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  transition: box-shadow 0.2s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.6);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  border: none;
+}
+
+/* Compact Emergency Power Button */
+.emergency-power-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--bg-dark);
+  color: var(--accent-red);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.emergency-power-btn:hover {
+  background: rgba(255, 51, 102, 0.2);
+  border-color: var(--bg-dark);
+ 
+  transform: scale(1.04);
+}
+
+.emergency-power-btn.paused {
+  background: rgba(243, 52, 100, 0.4);
+  border-color: var(--bg-dark);
+ 
+}
+
+/* DEX-style Pair Selector — two independent token buttons + swap */
+.dex-token-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  color: var(--text-main);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  transition: all 0.2s ease;
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+}
+
+.dex-token-btn:hover {
+  border-color: rgba(168, 85, 247, 0.5);
+  background: rgba(168, 85, 247, 0.08);
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.15);
+}
+
+.dex-token-label {
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.3px;
+}
+
+.dex-swap-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.25s ease;
+  flex-shrink: 0;
+}
+
+.dex-swap-btn:hover {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: var(--accent-violet);
+  color: var(--accent-violet);
+  transform: rotate(180deg);
+}

@@ -1,0 +1,36 @@
+# Node dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Build outputs
+dist/
+build/
+*.exe
+apps/server/*.exe
+
+
+# Desktop (Tauri) generated artifacts
+apps/desktop/icon-source.png
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/icons/
+apps/desktop/src-tauri/gen/
+apps/server/sea-config.json
+
+# Environment variables
+.env
+!.env.example
+
+# Internal working notes (PT-BR) — not for public git
+/docs/internal/
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

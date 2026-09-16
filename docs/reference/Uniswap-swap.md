@@ -1,0 +1,197 @@
+# Trading Overview (https://docs.uniswap.org/docs/trading/overview)
+
+Understand swap integration paths on Uniswap using Custom Linking, the Uniswap API, SDK, and smart contracts across supported chains.
+
+Uniswap offers distinct methods for integrating swapping functionality into your application (current router addresses per chain: https://docs.uniswap.org/trading/swapping-api/supported-chains). Choosing the right approach depends on your specific needs regarding customization, control, and development resources.
+
+| Approach            | Best For                        | Description                                                                              | Complexity | Get Started                                         |
+| :------------------ | :------------------------------ | :--------------------------------------------------------------------------------------- | :--------- | :-------------------------------------------------- |
+| **Custom Linking**  | Simple Referrals                | Directing users to the Uniswap Web App with pre-filled swap parameters.                  | Very Low   | [Here](https://docs.uniswap.org/docs/trading/custom-interface-links)        |
+| **Uniswap API**     | DApps, Wallets, Bots            | A hosted API that handles routing, quoting, and transaction construction for your app.   | Low        | [Here](https://docs.uniswap.org/docs/trading/swapping-api/getting-started)  |
+| **Uniswap SDK**     | Front-ends, Custom interactions | JavaScript/TypeScript libraries to compute routes and quotes locally on the client side (current router addresses per chain are in the supported-chains table). | Medium     | [Here](https://docs.uniswap.org/docs/sdks/v4/guides/swapping/quoting)       |
+| **Smart Contracts** | Onchain integrations, Arbitrage | Interacting directly with Router or Pool contracts via Solidity.                         | High       | [Here](https://docs.uniswap.org/protocols/v4/guides/swapping/swapping) |
+
+## Custom Linking (Simplest)
+For applications that want to provide swapping capabilities without managing transactions, quoting, or a custom UI, you can link directly to the Uniswap interface using URL query parameters. This allows you to pre-fill the input/output tokens, the amount, and even the UI theme. [Get started with all custom linking parameters](https://docs.uniswap.org/docs/trading/custom-interface-links).
+
+**How it works**
+By appending specific parameters to `https://app.uniswap.org/#/swap`, the Uniswap frontend will automatically configure the swap interface for the user.
+
+**Example Usage**
+To link to a swap of 10 units of a specific token as the input, you would use:
+`https://app.uniswap.org/#/swap?field=input&value=10&inputCurrency=0x0F5D2fB29fb7d3CFeE444a200298f468908cC942`
+
+## The Uniswap API (Easiest)
+The Uniswap API provides a straightforward path to integration. It abstracts away the complexity of finding the most efficient route based on current inputs (splitting and hopping between Uniswap v2, v3, v4, and UniswapX) and constructing transaction calldata. Your app still handles signing and onchain submission. [Get started with the API](https://docs.uniswap.org/docs/trading/swapping-api/getting-started).
+
+## How it works
+1. **Check Approval**: Use `/check_approval` to see if the user has authorized Permit2 or the router.
+2. **Get quote**: Send a `/quote` request. The API returns routing and quote data.
+3. **Get Transaction**: Send a `/swap` request. The API returns encoded transaction data
+4. **Submit**: The user signs the returned transaction, and your app submits it onchain through your signer or RPC provider.
+
+## What you handle
+You do not need to compile Solidity or manage pool state. You work with JSON responses, wallet signing, and transaction submission.
+
+```json
+{
+  "requestId": "<string>",
+  "quote": {
+    "orderInfo": {
+      "chainId": 1,
+      "input": {
+        "startAmount": "1000000",
+        "endAmount": "0",
+        "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+      },
+      "outputs": [
+        {
+          "startAmount": "0",
+          "endAmount": "1000000",
+          "token": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+          "recipient": "0x123..."
+        }
+      ]
+    }
+  }
+}
+```
+
+## The Uniswap SDK (Flexible)
+If you need offline computation, custom routing logic, or cannot rely on a hosted service, the TypeScript SDK is the standard client-side solution. The SDK provides utility classes for constructing pool keys, computing quotes, and encoding swap parameters, but it does **not** execute trades. You use the SDK's output to build transactions that you submit via a library like Ethers.js or Viem. [Get started with the SDK](https://docs.uniswap.org/docs/sdks/v4/guides/swapping/quoting).
+
+## How it works
+To propose a trade using the Uniswap v4 SDK, you construct a `PoolKey` that identifies the pool, then call the onchain `Quoter` contract to simulate the swap and get an expected output amount. The Quoter uses state-changing calls designed to be reverted, so quotes must be fetched offchain using `callStatic`.
+
+## What you handle
+You manage RPC connections, token definitions, and pool configuration. The SDK helps you structure all of this correctly.
+
+```typescript
+import { ethers, parseUnits, formatUnits } from 'ethers'
+import { Token, ChainId } from '@uniswap/sdk-core'
+
+// Define tokens
+const ETH_TOKEN = new Token(ChainId.MAINNET, '0x0000000000000000000000000000000000000000', 18, 'ETH')
+const USDC_TOKEN = new Token(ChainId.MAINNET, '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', 6, 'USDC')
+
+// Construct the PoolKey identifying the V4 pool
+const poolKey = {
+  currency0: ETH_TOKEN.address,
+  currency1: USDC_TOKEN.address,
+  fee: 500,
+  tickSpacing: 10,
+  hooks: '0x0000000000000000000000000000000000000000',
+}
+
+// Reference the V4 Quoter contract
+const quoterContract = new ethers.Contract(QUOTER_ADDRESS, QUOTER_ABI, provider)
+
+// Simulate the swap off-chain to get a quote
+const result = await quoterContract.callStatic.quoteExactInputSingle({
+  poolKey: poolKey,
+  zeroForOne: true,
+  exactAmount: parseUnits('1', ETH_TOKEN.decimals).toString(),
+  hookData: '0x00',
+})
+
+console.log(`Expected output: ${formatUnits(result.amountOut, USDC_TOKEN.decimals)} USDC`)
+```
+
+## Smart Contracts (Native)
+Building directly against the Uniswap v4 smart contracts gives you maximum control and composability. There are two distinct build paths depending on your goal:
+
+## Path A: Executing Swaps
+If your goal is to **perform swaps from an onchain contract**, for example, as part of an arbitrage bot, a vault strategy, or a DeFi protocol that needs to swap tokens during its operations, you interact with the `Universal Router` or the `PoolManager` directly. [Get started with smart contracts](https://docs.uniswap.org/protocols/v4/guides/swapping/swapping).
+
+The Universal Router is the recommended entry point. It uses a command-encoding pattern where you pack a sequence of actions (swap, settle input tokens, take output tokens) into byte arrays and execute them in a single transaction.
+
+```solidity
+// Encode the command: we want a V4 swap
+bytes memory commands = abi.encodePacked(uint8(Commands.V4_SWAP));
+
+// Encode the action sequence: swap → settle input → take output
+bytes memory actions = abi.encodePacked(
+    uint8(Actions.SWAP_EXACT_IN_SINGLE),
+    uint8(Actions.SETTLE_ALL),
+    uint8(Actions.TAKE_ALL)
+);
+
+// Encode parameters for each action
+bytes[] memory params = new bytes[](3);
+params[0] = abi.encode(
+    IV4Router.ExactInputSingleParams({
+        poolKey: key,
+        zeroForOne: true,
+        amountIn: amountIn,
+        amountOutMinimum: minAmountOut,
+        hookData: bytes("")
+    })
+);
+params[1] = abi.encode(key.currency0, amountIn);      // settle
+params[2] = abi.encode(key.currency1, minAmountOut);   // take
+
+inputs[0] = abi.encode(actions, params);
+router.execute(commands, inputs, deadline);
+```
+
+> **Safety Note**: When trading from smart contracts, you **must** enforce slippage limits via `amountOutMinimum` or use an onchain price oracle. Setting this to zero makes your contract vulnerable to sandwich attacks and price manipulation.
+
+## Path B: Customizing Swaps with Hooks
+If your goal is to **extend or modify swap behavior itself**, for example, to implement dynamic fees, on-swap oracles, limit orders, or access control, you write a **hook** contract. [Get started with hooks](https://docs.uniswap.org/protocols/v4/guides/hooks/swap-hooks).
+
+Hooks are external contracts that a Uniswap v4 pool calls at specific points during its lifecycle. For swaps, two hook functions are available:
+
+* **`beforeSwap`**: called before the swap executes. Can modify fees, enforce conditions, or reject the swap entirely.
+* **`afterSwap`**: called after the swap executes. Receives the resulting `BalanceDelta` and can perform follow-up logic.
+
+A hook contract declares which lifecycle points it implements via `getHookPermissions()`, and is associated with a pool during deployment.
+
+## FAQ
+<details>
+  <summary>
+    What are the ways to integrate Uniswap swaps into my app?
+  </summary>
+
+    There are four integration paths, in rising order of complexity:
+
+    * **[Custom Linking](https://docs.uniswap.org/docs/trading/custom-interface-links)**: directs users to the Uniswap web app with pre-filled swap parameters through URL query strings.
+    * **[Uniswap Trading API](https://docs.uniswap.org/docs/trading/swapping-api/getting-started)**: a hosted service that handles routing, quoting, and transaction construction.
+    * **[Uniswap SDK](https://docs.uniswap.org/docs/sdks/v4/guides/swapping/quoting)**: computes routes and quotes locally on the client side.
+    * **[Smart contracts](https://docs.uniswap.org/protocols/v4/guides/swapping/swapping)**: direct integration against the Universal Router or `PoolManager` for onchain control and composability.
+</details>
+
+<details>
+  <summary>
+    Does the Uniswap Trading API execute swaps for me?
+  </summary>
+
+    No. The [Trading API](https://docs.uniswap.org/docs/trading/swapping-api/getting-started) handles routing, quoting, and transaction construction, and returns encoded transaction data. Your application handles wallet signing and onchain submission through your own signer or RPC provider.
+
+    The flow is `/check_approval` to verify Permit2 or router authorization, `/quote` to get routing and quote data, then `/swap` to get the encoded transaction.
+</details>
+
+<details>
+  <summary>
+    How do I add Uniswap swaps to my site without building a swap UI?
+  </summary>
+
+    Use [Custom Linking](https://docs.uniswap.org/docs/trading/custom-interface-links). Append URL query parameters to `https://app.uniswap.org/#/swap` to pre-fill the input and output tokens, the amount, and the UI theme. The Uniswap interface configures the swap automatically for the user, so you do not manage transactions, quoting, or a custom UI.
+</details>
+
+<details>
+  <summary>
+    How do I execute a Uniswap swap from a smart contract?
+  </summary>
+
+    Interact with the [Universal Router](https://docs.uniswap.org/protocols/universal-router/overview), the recommended entry point, or with the `PoolManager` directly. The Universal Router uses a command-encoding pattern where you pack a sequence of actions, such as swap, settle input tokens, and take output tokens, into byte arrays and execute them in a single transaction. See [swapping with smart contracts](https://docs.uniswap.org/protocols/v4/guides/swapping/swapping).
+
+    Always enforce slippage limits through `amountOutMinimum` or an onchain price oracle; setting it to zero leaves your contract vulnerable to sandwich attacks and price manipulation.
+</details>
+
+<details>
+  <summary>
+    Can I customize how swaps execute on Uniswap v4?
+  </summary>
+
+    Yes, by writing a [hook](https://docs.uniswap.org/protocols/v4/guides/hooks/swap-hooks) contract. Hooks are external contracts that a Uniswap v4 pool calls at specific lifecycle points. For swaps, `beforeSwap` runs before the swap executes and can modify fees, enforce conditions, or reject the swap, while `afterSwap` runs after execution and receives the resulting `BalanceDelta`. A hook declares which lifecycle points it implements through `getHookPermissions`.
+</details>

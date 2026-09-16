@@ -1,0 +1,24 @@
+{
+  "name": "trust-ai-monorepo",
+  "version": "0.1.0",
+  "description": "TRusT-AI: Autonomous AI Trading Agent Infrastructure (Rust + TS + Web3)",
+  "private": true,
+  "scripts": {
+    "dev:server": "cd apps/server && npm run dev",
+    "dev:web": "cd apps/web && npm run dev",
+    "dev:engine": "cd crates/engine && cargo run",
+    "dev:desktop": "npm run stage:desktop && cd apps/desktop && npm run dev",
+    "build:server": "cd apps/server && npm run build",
+    "build:web": "cd apps/web && npm run build",
+    "build:engine": "cd crates/engine && cargo build --release",
+    "build:engine:windows": "cd crates/engine && cargo build --release --target x86_64-pc-windows-gnu",
+    "build:server:desktop": "cd apps/server && npm run build:desktop",
+    "stage:engine": "node scripts/copy-engine.mjs",
+    "stage:desktop": "node scripts/stage-sidecars.mjs",
+    "build:desktop:shell": "cd apps/desktop && npm run build",
+    "build:desktop": "npm run build:web && npm run build:server:desktop && npm run build:engine && npm run stage:engine && npm run build:desktop:shell"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

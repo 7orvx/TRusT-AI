@@ -1,0 +1,1 @@
+console.log('[gen-icon] Skipping auto-generation...');

@@ -1,0 +1,95 @@
+# Release Desktop (Windows .exe / .msi-ready NSIS installer)
+#
+# Triggered on tag push (v*) or manually. Builds on a clean windows-latest
+# runner:
+#   1. React dashboard (apps/web)      → static assets
+#   2. TS orchestrator (apps/server)   → standalone .exe via esbuild + Node SEA
+#   3. Rust engine (crates/engine)     → release binary, staged as Tauri sidecar
+#   4. Tauri desktop shell             → NSIS installer (.exe)
+# Then publishes SHA256SUMS.txt + the installer as a GitHub Release.
+#
+# Security & trust model (open-source route): binaries are built by GitHub's
+# clean infrastructure (reproducible, no local toolchain), and every artifact
+# ships with a SHA-256 checksum users can verify. The binaries are NOT code
+# signed, so Windows SmartScreen will still warn on first run — see
+# docs/SECURITY.md for the code-signing roadmap (Azure Trusted Signing).
+name: Release Desktop (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  desktop-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install web dependencies
+        run: npm install
+        working-directory: apps/web
+
+      - name: Build web dashboard
+        run: npm run build
+        working-directory: apps/web
+
+      - name: Install server dependencies
+        run: npm install
+        working-directory: apps/server
+
+      - name: Build standalone server exe (esbuild + Node SEA)
+        # Outputs apps/desktop/src-tauri/binaries/trust-ai-server-x86_64-pc-windows-msvc.exe
+        run: npm run build:desktop
+        working-directory: apps/server
+
+      - name: Build Rust engine (release)
+        run: cargo build --release
+        working-directory: crates/engine
+
+      - name: Stage engine sidecar binary
+        run: node scripts/copy-engine.mjs
+
+      - name: Install desktop dependencies
+        run: npm install
+        working-directory: apps/desktop
+
+      - name: Build Tauri desktop shell + NSIS installer
+        # Generates icons first (npm run icon), then bundles everything.
+        run: npm run build
+        working-directory: apps/desktop
+
+      - name: Compute SHA-256 checksums
+        shell: pwsh
+        run: |
+          $artifacts = @(
+            (Get-Item "apps/desktop/src-tauri/target/release/trust-ai-desktop.exe" -ErrorAction SilentlyContinue),
+            (Get-ChildItem "apps/desktop/src-tauri/target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue)
+          ) | Where-Object { $_ -ne $null }
+          $lines = foreach ($f in $artifacts) {
+            $hash = (Get-FileHash -Algorithm SHA256 -Path $f.FullName).Hash.ToLower()
+            "$hash  $($f.Name)"
+          }
+          $lines | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            SHA256SUMS.txt
+            apps/desktop/src-tauri/target/release/trust-ai-desktop.exe
+            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          generate_release_notes: true

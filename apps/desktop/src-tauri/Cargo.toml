@@ -1,0 +1,20 @@
+[package]
+name = "trust-ai-desktop"
+version = "0.1.0"
+description = "TRusT-AI Desktop Shell — spawns the TS orchestrator and Rust engine sidecars and hosts the dashboard WebView"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Tauri projects opt out of the parent Cargo workspace: the tauri dependency
+# tree is large and its build script validates sidecar binaries + icons at
+# compile time, so keeping it isolated keeps root `cargo check`/`build` fast
+# and engine-only. This crate has its own Cargo.lock.
+[workspace]

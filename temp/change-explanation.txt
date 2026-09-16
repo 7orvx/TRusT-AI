@@ -1,0 +1,13 @@
+A correção do `uniswapApi.ts` agora:
+
+- Não calcula mais o `UNISWAP_V3_ROUTER` e o `NETWORK_LABEL` uma única vez no carregamento do módulo (o bug que fixava o router no de Sepolia mesmo quando o `.env` apontava para `unichain-sepolia`).
+- Resolve a cada chamada de `getUniswapSwapData` um `routerAddress` e um `networkLabel` dinâmicos, na ordem de precedência:
+  1. `UNISWAP_V3_ROUTER` explícito no `.env` (quando definido no painel / no `.env` de sessão).
+  2. Rede configurada via RPC plug-in do dashboard (`/api/rpc-config` → `rpcConfig.network`) — esse é o caminho de UI que mais afeta o caso Unichain Sepolia quando o usuário muda a rede na credencial.
+  3. `NETWORK_NAME` do ambiente.
+  4. Tele de Sepolia (`ROUTER_BY_NETWORK.sepolia`) como último fallback.
+- Importa `rpcConfig` de `./index.js` e exporta a variável de estado em `apps/server/src/index.ts` para que o import seja válido (typescript reportou `TS2459: not exported` antes da correção).
+
+Em resumo: o `to_address` agora volta `0xf70536b3bcc1bd1a972dc186a2cf84cc6da6be5d` quando a rede selecionada / configurada é Unichain Sepolia, e a label do route summary vai para `UNICHAIN-SEPOLIA`, o que deve fechar o aviso de "cair no fallback de Sepolia" que estava acontecendo no frontend.
+
+Tipo de verificação: `cd apps/server && npx tsc --noEmit -p tsconfig.json`
