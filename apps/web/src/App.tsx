@@ -37,34 +37,31 @@ import {
   useActiveEnsName,
   useWalletConnect,
   useWalletDisconnect,
+  useSwitchChainHook,
   useActiveChainId,
   CHAIN_NAMES,
   type EIP1193,
 } from './wallet/config';
-import { NetworkSelector } from './wallet/NetworkSelector';
+import { getNetworkBadgeInfo, CHAIN_NAMES as WAGMI_CHAIN_NAMES } from './wallet/NetworkSelector';
+import { PICKER_NETWORKS, networkKeyForChainId, chainIdForNetworkKey, pairSupportedOnChain, isMockPair, MOCK_PAIR_CHAIN_ID, pickNetworkForPair, pickerNetworkLabel, PAIR_STORAGE_KEY, PAIR_INSTANCE_KEY, MAX_DYNAMIC_TOKENS_PER_TAB } from './pairNetworks';
 import {
   getTokenPrice,
   getUsdPrice,
+  getUsdPriceMap,
   getUsdChange24h,
   fetchTopTokens,
   type TopToken,
+  formatTruncatedAddress,
   getTokenBalance,
   getNativeBalance,
   getBlockNumber,
   getChainName,
   isTestnet,
   TOKENS,
+  TOKEN_LOGOS,
 } from './wallet/priceFetcher';
 
-// Chain ID → display color (mirrors the dashboard's accent palette).
-const CHAIN_COLORS: Record<number, string> = {
-  11155111: '#9d4edd', // Sepolia — purple
-  1: '#38ef7d',        // Ethereum Mainnet — green
-  42161: '#f5a524',    // Arbitrum — orange
-  8453: '#00d4aa',     // Base — teal
-  137: '#8247e0',      // Polygon — indigo
-  1301: '#ff3366',     // Unichain Sepolia — pink/red
-};
+
 
 // Minimal Permit2 ABI (approve + allowance) used by the v4 execution path. On
 // v4 the Universal Router pulls ERC20 inputs via Permit2.transferFrom, so the
@@ -305,7 +302,56 @@ const TOKEN_REGISTRY = [
   // "Force Test Swap" playground button (server-side /api/force-swap).
 ];
 
-const tokenBySymbol = (symbol: string) => TOKEN_REGISTRY.find((t) => t.symbol === symbol);
+// Unichain Sepolia mock tokens — selectable as the playground pair under the
+// Unichain Sepolia (1301) picker tab. Presentation registry only: the real
+// addresses/decimals live in the server catalog (mirrored with the Rust
+// engine), which is what the swap encoder consumes.
+const MOCK_REGISTRY = [
+  { symbol: 'mUSDT', name: 'Mock Tether (Unichain Sepolia)' },
+  { symbol: 'mUSDC', name: 'Mock USD Coin (Unichain Sepolia)' },
+] as const;
+
+// Chains a token exists on, for the pair picker network tabs: registry tokens
+// are mainnet-addressed (1), the mocks live on Unichain Sepolia (1301).
+const tokenChainsOf = (symbol: string): number[] => {
+  const known = knownChainOf(symbol);
+  return known ? [known] : [];
+};
+
+const tokenBySymbol = (symbol: string) =>
+  TOKEN_REGISTRY.find((t) => t.symbol === symbol) ??
+  MOCK_REGISTRY.find((t) => t.symbol === symbol);
+
+// Chain a token is KNOWN to live on, for the network badge overlay + filter.
+// Registry tokens carry mainnet addresses (chain 1); mUSDC/mUSDT are the
+// Unichain Sepolia mock tokens (1301). Dynamic top-100 entries have no
+// per-chain data — returning undefined keeps the UI honest (no badge / no
+// false "Ethereum" attribution) instead of guessing mainnet for everything.
+function knownChainOf(symbol: string): number | undefined {
+  if (symbol === 'mUSDC' || symbol === 'mUSDT') return 1301;
+  if (tokenBySymbol(symbol)) return 1;
+  return undefined;
+}
+
+// Presentation-only avatar: official token logo with a colored letter
+// fallback. Purely cosmetic — symbols/addresses (the identifiers shared with
+// the Rust engine and the server) are never derived from this component.
+function TokenAvatar({ symbol, size, color }: { symbol: string; size: number; color?: string }) {
+  const logo = TOKEN_LOGOS[symbol];
+  return (
+    <span className="token-avatar" style={{ background: color ?? '#3a4354', width: size, height: size, fontSize: size * 0.4, position: 'relative', overflow: 'hidden' }}>
+      <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{symbol.slice(0, 1)}</span>
+      {logo ? (
+        <img
+          src={logo}
+          alt=""
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+          onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
+        />
+      ) : null}
+    </span>
+  );
+}
 
 // Known EVM chains for the wallet dot (color) + tooltip label. Keyed by hex
 // chain id returned from eth_chainId. Add networks here as they are supported.
@@ -378,7 +424,36 @@ function AppContent() {
   const [currentProvider, setCurrentProvider] = useState<string>('mock');
   const [emergencyPause, setEmergencyPause] = useState(false);
   const [maxSlippageBps, setMaxSlippageBps] = useState<number>(50);
-  const [selectedPair, setSelectedPair] = useState<string>('WBTC/USDC');
+  // Pair persistence + echo guards. Seeded from localStorage so a page
+  // reload / StrictMode remount keeps the user's last pair instead of
+  // re-seeding the default (which the push effect would then re-push,
+  // reverting the server to a value the user had already changed).
+  const [selectedPair, setSelectedPair] = useState<string>(() => {
+    try { return localStorage.getItem(PAIR_STORAGE_KEY) || 'WBTC/USDC'; } catch { return 'WBTC/USDC'; }
+  });
+  // Mirror of the last pair value this UI actually observed (WS guards read
+  // state can't see fresh values inside the same closure). Seeded from the
+  // same persisted value.
+  const selectedPairRef = useRef<string>(selectedPair);
+  // Pair already pushed to the server (load-push effect guard).
+  const pushedPairRef = useRef<string | null>(selectedPair);
+  // Stable membership map for the curated quote-side cap (which dynamic
+  // tokens make the ~10-token counterpart list). Filled once in universe
+  // order and reused across renders/re-filters so the list never flickers.
+  const quoteDynamicSeen = useRef<Map<string, boolean>>(new Map());
+  // Per-instance echo guard: with TWO dashboards open (desktop WebView +
+  // browser tab), a per-value-only guard lets dashboard A apply dashboard B's
+  // echo as a "different" pair and re-push it — the WBTC/USDC↔WETH/USDC
+  // ping-pong. Instance keying makes every client ignore echoes that were not
+  // triggered by it; a client only writes its OWN pair after a user action.
+  const clientInstanceId = useRef<string>(
+    (() => { try { return localStorage.getItem(PAIR_INSTANCE_KEY) || ''; } catch { return ''; } })() ||
+    (() => { const id = Math.random().toString(36).slice(2); try { localStorage.setItem(PAIR_INSTANCE_KEY, id); } catch { /* private mode */ } return id; })()
+  );
+  useEffect(() => {
+    selectedPairRef.current = selectedPair;
+    try { localStorage.setItem(PAIR_STORAGE_KEY, selectedPair); } catch { /* private mode */ }
+  }, [selectedPair]);
   const [analysisIntervalSec, setAnalysisIntervalSec] = useState<number>(15);
   const [settingsTab, setSettingsTab] = useState<'risk' | 'v4' | 'network'>('risk');
 
@@ -422,9 +497,29 @@ function AppContent() {
   // DEX-style custom pair builder (base / quote token pickers)
   const [pairBase, setPairBase] = useState<string>('WETH');
   const [pairQuote, setPairQuote] = useState<string>('USDC');
+  // Server network key of the pair's EXECUTION chain (null = derived from the
+  // pair via pickNetworkForPair). Set when the user picks a pair under a
+  // network tab in the unified picker; pushed to the server via /api/settings
+  // so the swap route follows the pair, not a header dropdown.
+  const [pairChainKey, setPairChainKey] = useState<string | null>(null);
   const [isTokenPickerOpen, setIsTokenPickerOpen] = useState<false | 'base' | 'quote'>(false);
   const [tokenSearch, setTokenSearch] = useState<string>('');
+  const [selectedNetworkFilter, setSelectedNetworkFilter] = useState<number | 'ALL'>(() => {
+    try {
+      const stored = localStorage.getItem('trust_ai_pair_chain');
+      const parsed = stored ? parseInt(stored, 10) : NaN;
+      // Only restore filters that still exist as picker tabs (legacy values
+      // like Sepolia 11155111 are no longer offered — fall back to 'ALL').
+      if (!Number.isNaN(parsed) && PICKER_NETWORKS.some((n) => n.chainId === parsed)) return parsed;
+      return 'ALL';
+    } catch {
+      return 'ALL';
+    }
+  });
   
+  // Network dropdown inside the pair picker (minimal icon selector).
+  const [netDropdownOpen, setNetDropdownOpen] = useState(false);
+
   // Web3 Wallet State - wagmi + AppKit share ONE store (Reown WagmiAdapter), so
   // the header always mirrors the real wallet session (extension OR WalletConnect).
   const { address: account, isConnected, chainId: wagmiChainId } = useActiveAccount();
@@ -435,12 +530,16 @@ function AppContent() {
   const wagmiChainIdNum = wagmiChainId;
   const chainId = wagmiChainIdNum ? `0x${wagmiChainIdNum.toString(16)}` : null;
   const { disconnect } = useWalletDisconnect();
+  // Async chain switch — used by the swap executor to move the wallet to the
+  // route's target network before signing (wallet-side prompt, no manual
+  // header switching needed).
+  const { switchChainAsync } = useSwitchChainHook();
   // Balance is read from the active provider and refreshed whenever the
   // account changes (or the user switches accounts in their wallet).
   const [balance, setBalance] = useState<string | null>(null);
 
-  // Network selector state
-  const [networkSelectorOpen, setNetworkSelectorOpen] = useState(false);
+  // Header network dropdown REMOVED — network selection lives in the unified
+  // pair picker (Rede + Par in one place).
   const [aiDropdownOpen, setAiDropdownOpen] = useState(false);
 
   // Close the AI provider dropdown when clicking outside.
@@ -505,15 +604,16 @@ function AppContent() {
     const fetchUsdPrices = async () => {
       if (cancelled) return;
       try {
-        const usdPricesPromise = Object.keys(TOKENS).map((sym) =>
-          getUsdPrice(sym, wagmiChainIdNum ?? 11155111).then((p) => ({ sym, p }))
-        );
-        const usdPricesResult = await Promise.all(usdPricesPromise);
-        if (!cancelled) {
-          const usdMap: Record<string, number> = {};
-          for (const { sym, p } of usdPricesResult) {
-            usdMap[sym] = p;
-          }
+        // UNIFIED price source: one batched map covering the registry tokens
+        // PLUS the dynamic top-100 (the same rows the pair picker shows). The
+        // monitor card therefore displays exactly the number seen while
+        // selecting the pair — no selector-vs-monitor divergence.
+        const symbols = Array.from(new Set([
+          ...Object.keys(TOKENS),
+          ...topTokensRef.current.map((t) => t.symbol),
+        ]));
+        const usdMap = await getUsdPriceMap(symbols);
+        if (!cancelled && Object.keys(usdMap).length > 0) {
           setLiveUsdPrices(usdMap);
           setLastPriceUpdate(new Date());
         }
@@ -540,9 +640,12 @@ function AppContent() {
         if (cancelled) return;
 
         try {
-          // Block number.
+          // Block number first — when the RPC circuit breaker is open or the
+          // endpoint is down it returns 0 and the whole cycle is skipped
+          // (no pointless balance calls against a dead endpoint).
           const block = await getBlockNumber(wagmiChainIdNum);
-          if (!cancelled) setLiveBlockNumber(block);
+          if (!cancelled && block > 0) setLiveBlockNumber(block);
+          if (!block) return;
 
           // Token price pair (on-chain or simulated).
           const pair = selectedPair !== 'ALL' && selectedPair.includes('/')
@@ -556,25 +659,36 @@ function AppContent() {
             setLivePrices({ [`${baseSym}/${quoteSym}`]: price });
           }
 
-          // Token balances.
-          if (!cancelled && isTestnet(wagmiChainIdNum)) {
-            setLiveTokenBalances({});
-          } else if (!cancelled) {
-            const balPromise = Promise.all(
-              Object.keys(TOKENS).map((sym) =>
-                getTokenBalance(sym, account, wagmiChainIdNum).then((b) => ({ sym, b }))
-              )
-            );
-            const [nativeBal, tokenBalsResult] = await Promise.all([
-              getNativeBalance(account, wagmiChainIdNum),
-              balPromise,
-            ]);
-            if (!cancelled) {
-              const balMap: Record<string, number> = { ETH: nativeBal };
-              for (const { sym, b } of tokenBalsResult) {
-                if (b > 0) balMap[sym] = b;
+          // Token balances — ONLY tokens whose catalog chain matches the
+          // wallet chain. Registry tokens are mainnet-addressed and m-tokens
+          // live on Unichain Sepolia; reading them against Arbitrum/Base
+          // guarantees contract-not-found errors on every cycle (the 3k-error
+          // console storm). On other chains only the native balance shows.
+          if (!cancelled) {
+            const balanceSymbols = Object.keys(TOKENS).filter((sym) => {
+              if (sym === 'mUSDC' || sym === 'mUSDT') return wagmiChainIdNum === 1301;
+              return wagmiChainIdNum === 1;
+            });
+            if (balanceSymbols.length === 0) {
+              const nativeBal = await getNativeBalance(account, wagmiChainIdNum);
+              if (!cancelled) setLiveTokenBalances({ ETH: nativeBal });
+            } else {
+              const balPromise = Promise.all(
+                balanceSymbols.map((sym) =>
+                  getTokenBalance(sym, account, wagmiChainIdNum).then((b) => ({ sym, b }))
+                )
+              );
+              const [nativeBal, tokenBalsResult] = await Promise.all([
+                getNativeBalance(account, wagmiChainIdNum),
+                balPromise,
+              ]);
+              if (!cancelled) {
+                const balMap: Record<string, number> = { ETH: nativeBal };
+                for (const { sym, b } of tokenBalsResult) {
+                  if (b > 0) balMap[sym] = b;
+                }
+                setLiveTokenBalances(balMap);
               }
-              setLiveTokenBalances(balMap);
             }
           }
         } catch (err) {
@@ -583,7 +697,9 @@ function AppContent() {
       };
 
       fetchLiveData();
-      onChainInterval = setInterval(fetchLiveData, 12000);
+      // 30s cadence — balance/block data is decorative; 12s × (2 reads × 11
+      // tokens) against free public RPCs trips their rate limits for everyone.
+      onChainInterval = setInterval(fetchLiveData, 30000);
     }
 
     return () => {
@@ -662,6 +778,10 @@ function AppContent() {
   // Dynamic token universe for the picker: top ~100 tokens by market cap
   // (CoinGecko /coins/markets — one call, refreshed every 10 min).
   const [topTokens, setTopTokens] = useState<TopToken[]>([]);
+  // Ref mirror for callbacks that must read the LATEST top-token list without
+  // re-subscribing the 60s price loop (unified monitor/picker price source).
+  const topTokensRef = useRef<TopToken[]>([]);
+  useEffect(() => { topTokensRef.current = topTokens; }, [topTokens]);
 
   // Picker list: tradable registry tokens (with real addresses + colors) first,
   // then the top-market-cap tokens. Registry wins on symbol collisions. On the
@@ -672,7 +792,16 @@ function AppContent() {
   const pickerTokens = useMemo<TopToken[]>(() => {
     const universe = new Map<string, TopToken>();
     for (const t of TOKEN_REGISTRY) {
-      universe.set(t.symbol, { symbol: t.symbol, name: t.name, usd: liveUsdPrices[t.symbol] ?? 0, change24h: null });
+      universe.set(t.symbol, { symbol: t.symbol, name: t.name, usd: liveUsdPrices[t.symbol] ?? 0, change24h: getUsdChange24h(t.symbol), logoURI: TOKEN_LOGOS[t.symbol] });
+    }
+    // Unichain Sepolia tab: the mock playground tokens (mUSDC/mUSDT) are
+    // selectable again as a REAL pair for the user-deployed test pool — the
+    // server's mock detection handles routing them to the Unichain Sepolia
+    // v4 route.
+    for (const m of MOCK_REGISTRY) {
+      if (!universe.has(m.symbol)) {
+        universe.set(m.symbol, { symbol: m.symbol, name: m.name, usd: 0, change24h: null, logoURI: undefined });
+      }
     }
     for (const t of topTokens) {
       if (!universe.has(t.symbol)) universe.set(t.symbol, t);
@@ -833,15 +962,25 @@ function AppContent() {
       // wallet_chain_id is authoritative: the server always derives it from
       // the same resolution that encoded the calldata.
       const targetChainId = swapData.wallet_chain_id;
-      const chainMismatch =
-        wagmiChainIdNum !== undefined &&
-        targetChainId !== undefined &&
-        wagmiChainIdNum !== targetChainId;
-      if (chainMismatch) {
+      if (wagmiChainIdNum !== undefined && targetChainId !== undefined && wagmiChainIdNum !== targetChainId) {
         setTxStatus('error');
-        alert(
-          `This swap route targets ${CHAIN_NAMES[targetChainId] ?? `chain ${targetChainId}`}, but your wallet is on ${CHAIN_NAMES[wagmiChainIdNum] ?? `chain ${wagmiChainIdNum}`}. Switch the network in the header dropdown, then retry.`
-        );
+        const targetName = CHAIN_NAMES[targetChainId] ?? `chain ${targetChainId}`;
+        const walletName = CHAIN_NAMES[wagmiChainIdNum] ?? `chain ${wagmiChainIdNum}`;
+        // Ask the wallet to switch network itself instead of demanding a manual
+        // switch in the header: switchChain opens the wallet's own network
+        // prompt (MetaMask/Rabby popup or a WalletConnect session update) and
+        // wagmi auto-requests wallet_addEthereumChain for missing networks.
+        // Execution stays locked (the signal lock is released in the finally);
+        // the user re-clicks Confirm Swap once the wallet is on the target.
+        try {
+          await switchChainAsync({ chainId: targetChainId });
+          alert(`Network switch to ${targetName} confirmed in your wallet. Click Confirm Swap again to execute.`);
+        } catch (err) {
+          console.warn('Automatic network switch rejected:', err);
+          alert(
+            `This swap route targets ${targetName}, but your wallet is on ${walletName} and the network switch was rejected. Switch to ${targetName} in the header dropdown, then retry.`
+          );
+        }
         return;
       }
 
@@ -1043,8 +1182,16 @@ function AppContent() {
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimeout: any = null;
+    // disposed guards the reconnect loop: the cleanup closes the socket,
+    // which fires onclose ASYNCHRONOUSLY AFTER the effect is gone — without
+    // this flag that late onclose schedules a GHOST reconnect on the dead
+    // closure. Ghost sockets reconnect forever, each receives SYSTEM_INIT
+    // carrying the server's OLD pair and silently revert the user's just-
+    // picked pair (the "state keeps restoring itself" bug).
+    let disposed = false;
 
     const connect = () => {
+      if (disposed) return;
       ws = new WebSocket('ws://localhost:3001');
 
       ws.onopen = () => {
@@ -1062,7 +1209,14 @@ function AppContent() {
             if (data.data.maxSlippageBps) setMaxSlippageBps(data.data.maxSlippageBps);
             // Budget is client-owned per token symbol (budgetsByToken): the
             // server echo is intentionally ignored so restarts can't clobber it.
-            if (data.data.selectedPair) setSelectedPair(data.data.selectedPair);
+            // PAIR GUARD (two layers): only when the server flags a REAL change
+            // (pairChanged from THIS request's mutation — single-writer), AND
+            // when this instance didn't originate it (two dashboards — desktop
+            // WebView + browser tab — would otherwise ping-pong each other).
+            if (data.data.selectedPair && data.data.pairChanged === true && data.data.changedBy !== clientInstanceId.current) {
+              selectedPairRef.current = data.data.selectedPair;
+              setSelectedPair(data.data.selectedPair);
+            }
             if (data.data.analysisIntervalSec) setAnalysisIntervalSec(data.data.analysisIntervalSec);
             // v4 route state (PoolKey/hook fields — v4 is the only route).
             if (typeof data.data.v4Fee === 'number' && data.data.v4Fee > 0) setV4Fee(data.data.v4Fee);
@@ -1104,8 +1258,13 @@ function AppContent() {
             setCurrentProvider(data.payload.provider);
             setEmergencyPause(data.payload.emergencyPause);
             setMaxSlippageBps(data.payload.maxSlippageBps);
-            // See SYSTEM_INIT — per-token budgets live client-side.
-            if (data.payload.selectedPair) setSelectedPair(data.payload.selectedPair);
+            // See SYSTEM_INIT — per-token budgets live client-side. Pair echo
+            // applies ONLY on a server-flagged real change not originated by
+            // this instance (two-layer ping-pong guard).
+            if (data.payload.selectedPair && data.payload.pairChanged === true && data.payload.changedBy !== clientInstanceId.current) {
+              selectedPairRef.current = data.payload.selectedPair;
+              setSelectedPair(data.payload.selectedPair);
+            }
             if (data.payload.analysisIntervalSec) setAnalysisIntervalSec(data.payload.analysisIntervalSec);
             if (typeof data.payload.v4Fee === 'number' && data.payload.v4Fee > 0) setV4Fee(data.payload.v4Fee);
             if (typeof data.payload.v4TickSpacing === 'number' && data.payload.v4TickSpacing > 0) setV4TickSpacing(data.payload.v4TickSpacing);
@@ -1119,7 +1278,7 @@ function AppContent() {
 
       ws.onclose = () => {
         setConnected(false);
-        reconnectTimeout = setTimeout(connect, 3000);
+        if (!disposed) reconnectTimeout = setTimeout(connect, 3000);
       };
 
       ws.onerror = (err) => {
@@ -1131,8 +1290,9 @@ function AppContent() {
     connect();
 
     return () => {
-      if (ws) ws.close();
+      disposed = true;
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (ws) ws.close();
     };
   }, []);
 
@@ -1158,7 +1318,12 @@ function AppContent() {
         pause: pauseState !== undefined ? pauseState : emergencyPause,
         maxSlippage: slippage !== undefined ? slippage : maxSlippageBps
       };
-      if (pair !== undefined) payload.pair = pair;
+      if (pair !== undefined) {
+        payload.pair = pair;
+        // Echo origin tag: lets OTHER dashboard instances ignore this push's
+        // broadcast while THIS instance recognizes (and skips) its own echo.
+        payload.changedBy = clientInstanceId.current;
+      }
       if (interval !== undefined) payload.analysisInterval = interval;
       if (tradeAmount !== undefined) payload.maxTradeAmount = tradeAmount;
       if (rpc !== undefined) {
@@ -1497,8 +1662,13 @@ function AppContent() {
 
   // On load/switch, re-push the selected pair and network/RPC link so the
   // orchestrator and engine stay in sync without the user re-choosing.
+  // PUSH GUARD: the pair is pushed at most once per value — WS echoes call
+  // this effect again with the same pair, and re-pushing would re-broadcast
+  // and re-echo forever (server ping-pong). User actions (pair picker, flip,
+  // preset chips) always push explicitly and update pushedPairRef.
   useEffect(() => {
-    if (selectedPair !== 'ALL') {
+    if (selectedPair !== 'ALL' && pushedPairRef.current !== selectedPair) {
+      pushedPairRef.current = selectedPair;
       handleUpdateSettings(undefined, undefined, undefined, undefined, selectedPair);
     }
     try {
@@ -1520,12 +1690,15 @@ function AppContent() {
   }, [selectedPair]);
 
   // Keep the custom pair builder in sync when the orchestrator reports a pair
-  // selection (SYSTEM_INIT / SETTINGS_UPDATED or a preset chip click).
+  // selection (SYSTEM_INIT / SETTINGS_UPDATED or a preset chip click). The
+  // execution chain is restored from the pair itself only while unset, so a
+  // user-picked network tab is never overridden by a settings echo.
   useEffect(() => {
     if (selectedPair !== 'ALL' && selectedPair.includes('/')) {
       const [b, q] = selectedPair.split('/');
       setPairBase(b);
       setPairQuote(q);
+      setPairChainKey((cur) => cur ?? pickNetworkForPair(b, q) ?? null);
     }
   }, [selectedPair]);
 
@@ -1543,7 +1716,18 @@ function AppContent() {
     setPairBase(base);
     setPairQuote(quote);
     const pairId = `${base}/${quote}`;
+    pushedPairRef.current = pairId;
+    // Sync the ref synchronously: any WS echo arriving before React commits
+    // (or from a lingering socket) must see the NEW value, not the old one.
+    selectedPairRef.current = pairId;
     setSelectedPair(pairId);
+    // Execution network = the picker tab the token was picked under (falls
+    // back to the pair's default chain for preset chips / searches that
+    // ignore tabs). This is what makes Rede + Par one single decision.
+    const chainKey =
+      selectedNetworkFilter !== 'ALL' ? networkKeyForChainId(selectedNetworkFilter) : pickNetworkForPair(base, quote);
+    setPairChainKey(chainKey ?? null);
+    applyPairNetwork(base, quote, chainKey ?? null, pairId);
     handleUpdateSettings(undefined, undefined, undefined, undefined, pairId);
   };
 
@@ -1552,7 +1736,12 @@ function AppContent() {
     setPairBase(pairQuote);
     setPairQuote(pairBase);
     const pairId = `${pairQuote}/${pairBase}`;
+    pushedPairRef.current = pairId;
+    selectedPairRef.current = pairId;
     setSelectedPair(pairId);
+    // Flipping the pair keeps the execution chain (both sides were picked
+    // under the same network tab).
+    applyPairNetwork(pairQuote, pairBase, pairChainKey, pairId);
     handleUpdateSettings(undefined, undefined, undefined, undefined, pairId);
   };
 
@@ -1587,19 +1776,33 @@ function AppContent() {
     }
   };
 
-  const handleChainSelected = (newChainId: number) => {
-    const netKeyMap: Record<number, string> = {
-      11155111: 'sepolia',
-      1301: 'unichain-sepolia',
-      130: 'unichain',
-      1: 'mainnet',
-    };
-    const rpcNet = netKeyMap[newChainId];
-    if (rpcNet) {
-      setRpcNetwork(rpcNet);
-      handleUpdateSettings(undefined, undefined, undefined, undefined, undefined, undefined, undefined, { rpcNetwork: rpcNet });
-    }
+  // Header network dropdown REMOVED: the execution network is derived from the
+  // monitored pair (see pairNetworks.ts). applyPairNetwork pushes the pair's
+  // server network key via /api/settings — the server maps it to the swap
+  // route even without a configured RPC URL.
+  const applyPairNetwork = (base: string, quote: string, chainKey: string | null, pairId: string) => {
+    const netKey = chainKey ?? pickNetworkForPair(base, quote);
+    if (!netKey) return;
+    const chainId = chainIdForNetworkKey(netKey);
+    setRpcNetwork(netKey);
+    setPairChainKey(netKey);
+    if (chainId !== undefined) setSelectedNetworkFilter(chainId);
+    try { localStorage.setItem('trust_ai_pair_chain', String(chainId ?? '')); } catch { /* private mode */ }
+    // Push the pair's network to the server — the swap route follows the
+    // pair even without an RPC URL configured (server maps the key alone).
+    handleUpdateSettings(undefined, undefined, undefined, undefined, undefined, undefined, undefined, { rpcNetwork: netKey });
+    void pairId;
   };
+
+  // Sync the picker's network filter with the pair's execution chain (the
+  // filter is saved for the next load; the picker still opens on 'ALL').
+  useEffect(() => {
+    if (selectedPair === 'ALL' || !selectedPair.includes('/')) return;
+    const [b, q] = selectedPair.split('/');
+    const chainId = isMockPair(b, q) ? MOCK_PAIR_CHAIN_ID : knownChainOf(b) ?? knownChainOf(q);
+    if (chainId === undefined) return;
+    try { localStorage.setItem('trust_ai_pair_chain', String(chainId)); } catch { /* private mode */ }
+  }, [selectedPair]);
 
   return (
     <div style={{ padding: '24px', maxWidth: '1440px', margin: '0 auto' }}>
@@ -1648,13 +1851,19 @@ function AppContent() {
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent-green)' }} />
                 <span className="font-mono" style={{ fontSize: '0.76rem' }}>{account.slice(0, 6)}…{account.slice(-4)}</span>
                 {isConnected && (
-                  <button
+                  // span (not button): nesting a <button> inside the wallet
+                  // <button> is invalid DOM (validateDOMNesting warning) and
+                  // breaks the header's render reconciliation.
+                  <span
+                    role="button"
+                    tabIndex={0}
                     onClick={(e) => { e.stopPropagation(); disconnect(); setBalance(null); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); disconnect(); setBalance(null); } }}
                     title="Disconnect wallet"
-                    style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.7rem', padding: '2px 4px', borderRadius: '4px' }}
+                    style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.7rem', padding: '2px 4px', borderRadius: '4px', display: 'inline-flex' }}
                   >
                     ✕
-                  </button>
+                  </span>
                 )}
               </>
             ) : isConnectingWallet ? (
@@ -1664,8 +1873,24 @@ function AppContent() {
             )}
           </button>
 
-          {/* Minimalist Network Selector */}
-          <NetworkSelector open={networkSelectorOpen} onToggle={() => setNetworkSelectorOpen((v) => !v)} onSelectChain={handleChainSelected} autoClose />
+          {/* Monitored-network pill — read-only: the execution network is
+              derived from the monitored pair (picked under a network tab in
+              the unified pair picker). No dropdown, no state divergence. */}
+          {(() => {
+            const cid = pairChainKey ? chainIdForNetworkKey(pairChainKey) : undefined;
+            if (cid === undefined) return null;
+            const b = getNetworkBadgeInfo(cid);
+            return (
+              <span
+                className="header-pill"
+                title={`Execution network: ${b.label} — derived from the monitored pair. Change it in the pair picker (network tabs).`}
+                style={{ padding: '5px 10px', gap: '6px', margin: 0, cursor: 'default' }}
+              >
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: b.color, display: 'inline-block', flexShrink: 0 }} />
+                <span style={{ fontSize: '0.66rem', fontWeight: 700, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{b.label}</span>
+              </span>
+            );
+          })()}
 
           {/* Dedicated Status Pills: Chip (Engine) + Wi-Fi (Network WS) */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1953,76 +2178,292 @@ function AppContent() {
         </>
       )}
 
-      {/* Token Picker Modal - Custom Pair Builder */}
+      {/* Token Picker Modal - Dynamic Multichain DEX UX (Uniswap-style) */}
       {isTokenPickerOpen && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }} onClick={() => setIsTokenPickerOpen(false)}>
-          <div className="glass-panel" style={{ width: '100%', maxWidth: '440px', padding: '24px', borderRadius: '12px' }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
-              <h2 style={{ fontSize: '1.1rem', fontWeight: 700 }}>
-                Select {isTokenPickerOpen === 'base' ? 'Base' : 'Quote'} Token
-              </h2>
-              <button onClick={() => setIsTokenPickerOpen(false)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1.1rem' }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }} onClick={() => setIsTokenPickerOpen(false)}>
+          <div className="token-picker-modal" onClick={(e) => e.stopPropagation()}>
+            {/* Modal Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+              <div>
+                <h2 style={{ fontSize: '1.15rem', fontWeight: 800, color: '#ffffff', letterSpacing: '-0.3px' }}>
+                  Select {isTokenPickerOpen === 'base' ? 'Base' : 'Quote'} Token
+                </h2>
+                <div style={{ fontSize: '0.73rem', color: 'var(--text-dim)', marginTop: '2px' }}>
+                  Search by symbol, name, or paste contract address (0x…)
+                </div>
+              </div>
+              <button onClick={() => setIsTokenPickerOpen(false)} style={{ background: 'rgba(255,255,255,0.06)', border: 'none', color: 'var(--text-muted)', width: '28px', height: '28px', borderRadius: '50%', cursor: 'pointer', fontSize: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 ✕
               </button>
             </div>
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginBottom: '14px' }}>
-              {isTokenPickerOpen === 'quote'
-                ? 'Top tokens by market cap (live prices). Choosing one immediately monitors the new BASE/QUOTE pair.'
-                : 'Tokens with a deployable address can be traded (base side); all others are view-only pairs.'}
-            </p>
-            <input
-              autoFocus
-              type="text"
-              placeholder="Search symbol or name..."
-              value={tokenSearch}
-              onChange={(e) => setTokenSearch(e.target.value)}
-              style={{ width: '100%', padding: '10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#fff', fontSize: '0.85rem', marginBottom: '12px' }}
-            />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '340px', overflowY: 'auto' }}>
+
+            {/* Search Box */}
+            <div className="token-search-box">
+              <input
+                autoFocus
+                type="text"
+                className="token-search-input"
+                placeholder="Search symbol, name, or paste address 0x…"
+                value={tokenSearch}
+                onChange={(e) => setTokenSearch(e.target.value)}
+              />
+              {tokenSearch && (
+                <button
+                  onClick={() => setTokenSearch('')}
+                  style={{ position: 'absolute', right: '12px', background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.85rem' }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Quick Select Pills (ETH, USDC, USDT, WBTC...) with Network Badge Overlay */}
+            <div className="quick-pills-container">
+              {[
+                { symbol: 'ETH', name: 'Ethereum', color: '#627eea', chainId: 1 },
+                { symbol: 'USDC', name: 'USD Coin', color: '#2775ca', chainId: 1 },
+                { symbol: 'USDT', name: 'Tether USD', color: '#26a17b', chainId: 1 },
+                { symbol: 'WBTC', name: 'Wrapped Bitcoin', color: '#f7931a', chainId: 1 },
+                { symbol: 'LINK', name: 'Chainlink', color: '#2a5ada', chainId: 1 },
+                { symbol: 'UNI', name: 'Uniswap', color: '#ff007a', chainId: 1 },
+              ].map((pill) => {
+                const badge = getNetworkBadgeInfo(pill.chainId);
+                const isActive = (isTokenPickerOpen === 'base' ? pairBase : pairQuote) === pill.symbol;
+                const logoUrl = TOKEN_LOGOS[pill.symbol];
+                return (
+                  <button
+                    key={pill.symbol}
+                    className={`quick-pill-btn ${isActive ? 'active' : ''}`}
+                    onClick={() => pickBuilderToken(isTokenPickerOpen, pill.symbol)}
+                  >
+                    <div className="token-icon-wrapper">
+                      {logoUrl ? (
+                        <img
+                          src={logoUrl}
+                          alt={pill.symbol}
+                          style={{ width: 20, height: 20, borderRadius: '50%', objectFit: 'cover' }}
+                          onError={(e) => {
+                            (e.currentTarget as HTMLElement).style.display = 'none';
+                            const fallback = (e.currentTarget.nextElementSibling as HTMLElement);
+                            if (fallback) fallback.style.display = 'inline-flex';
+                          }}
+                        />
+                      ) : null}
+                      <span
+                        className="token-avatar"
+                        style={{
+                          width: 20,
+                          height: 20,
+                          fontSize: '0.65rem',
+                          background: pill.color,
+                          display: logoUrl ? 'none' : 'inline-flex',
+                        }}
+                      >
+                        {pill.symbol.slice(0, 1)}
+                      </span>
+                      <span className="network-badge-overlay" style={{ background: badge.color }} title={badge.label}>
+                        <span className="network-badge-letter" style={{ display: badge.logo ? 'none' : 'block' }}>{badge.symbol}</span>
+                        {badge.logo ? (
+                          <img
+                            src={badge.logo}
+                            alt=""
+                            onError={(e) => {
+                              (e.currentTarget as HTMLElement).style.display = 'none';
+                              const fallback = e.currentTarget.previousElementSibling as HTMLElement | null;
+                              if (fallback) fallback.style.display = 'block';
+                            }}
+                          />
+                        ) : null}
+                      </span>
+                    </div>
+                    <span>{pill.symbol}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Network Selector — minimal icon dropdown. Picking a token under
+                a network sets the pair's execution chain (pairNetworks.ts keeps
+                it in sync with the server's per-chain contract map). */}
+            <div style={{ position: 'relative', marginBottom: '10px' }}>
+              <button
+                className="network-chip-btn active"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '7px 12px' }}
+                onClick={() => setNetDropdownOpen((v) => !v)}
+              >
+                {(() => {
+                  if (selectedNetworkFilter === 'ALL') return <span style={{ fontSize: '0.74rem', fontWeight: 700 }}>◎ All Networks</span>;
+                  const b = getNetworkBadgeInfo(selectedNetworkFilter);
+                  return (
+                    <>
+                      <span style={{ width: 15, height: 15, borderRadius: '50%', background: b.color, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.48rem', fontWeight: 800, color: '#fff', overflow: 'hidden', flexShrink: 0 }}>
+                        {b.logo ? <img src={b.logo} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : b.symbol}
+                      </span>
+                      <span style={{ fontSize: '0.74rem', fontWeight: 700 }}>{b.label}</span>
+                    </>
+                  );
+                })()}
+                <ChevronDown size={12} style={{ color: 'var(--text-dim)' }} />
+              </button>
+              {netDropdownOpen && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, zIndex: 60, minWidth: 210, marginTop: 4, background: 'rgba(10,14,22,0.97)', border: '1px solid var(--border-color)', borderRadius: 10, padding: 6, display: 'flex', flexDirection: 'column', gap: 2, boxShadow: '0 12px 32px rgba(0,0,0,0.5)' }}>
+                  {[
+                    { id: 'ALL' as const, label: 'All Networks' },
+                    ...PICKER_NETWORKS.map((n) => ({ id: n.chainId as number | 'ALL', label: n.label })),
+                  ].map((chip) => {
+                    const isActive = selectedNetworkFilter === chip.id;
+                    const b = chip.id === 'ALL' ? null : getNetworkBadgeInfo(chip.id as number);
+                    return (
+                      <button
+                        key={chip.id.toString()}
+                        onClick={() => { setSelectedNetworkFilter(chip.id); setNetDropdownOpen(false); }}
+                        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', borderRadius: 7, border: 'none', cursor: 'pointer', textAlign: 'left', width: '100%', background: isActive ? 'rgba(120,180,255,0.12)' : 'transparent', color: isActive ? '#fff' : 'var(--text-muted)', fontSize: '0.74rem', fontWeight: isActive ? 700 : 500 }}
+                      >
+                        {b ? (
+                          <span style={{ width: 15, height: 15, borderRadius: '50%', background: b.color, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.48rem', fontWeight: 800, color: '#fff', overflow: 'hidden', flexShrink: 0 }}>
+                            {b.logo ? <img src={b.logo} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : b.symbol}
+                          </span>
+                        ) : (
+                          <span style={{ width: 15, textAlign: 'center', flexShrink: 0 }}>◎</span>
+                        )}
+                        {chip.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Section Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', padding: '0 2px' }}>
+              <div style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Activity size={12} style={{ color: 'var(--accent-cyan)' }} />
+                Tokens sorted by 24h volume
+              </div>
+            </div>
+
+            {/* Token List */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '330px', overflowY: 'auto', paddingRight: '2px' }}>
               {pickerTokens
                 .filter((t) => isTokenPickerOpen === 'base' ? tokenBySymbol(t.symbol) !== undefined : true)
+                .filter((t) => {
+                  // Curated counterpart list: on the QUOTE side, price-only
+                  // top-100 tokens are capped (registry/mocks are uncapped —
+                  // they are the executable catalog, ~10 per network).
+                  if (isTokenPickerOpen === 'quote' && !tokenBySymbol(t.symbol)) {
+                    const seen = quoteDynamicSeen.current;
+                    if (seen.has(t.symbol)) return seen.get(t.symbol)!;
+                    seen.set(t.symbol, (seen.size ?? 0) < MAX_DYNAMIC_TOKENS_PER_TAB);
+                  }
+                  return true;
+                })
+                .filter((t) => {
+                  if (selectedNetworkFilter === 'ALL') return true;
+                  // Honest filtering: a token matches a chain chip when it is
+                  // actually deployed there (chains from the CoinGecko platform
+                  // map). Registry tokens are mainnet; m-tokens Unichain Sepolia;
+                  // tokens with no known chains only show under "All Networks".
+                  const tokenChains = t.chains ?? (t.chainId !== undefined ? [t.chainId] : (() => { const c = knownChainOf(t.symbol); return c !== undefined ? [c] : []; })());
+                  return tokenChains.includes(selectedNetworkFilter);
+                })
                 .filter(
                   (t) =>
                     t.symbol.toLowerCase().includes(tokenSearch.toLowerCase()) ||
-                    t.name.toLowerCase().includes(tokenSearch.toLowerCase())
+                    t.name.toLowerCase().includes(tokenSearch.toLowerCase()) ||
+                    (t.address && t.address.toLowerCase().includes(tokenSearch.toLowerCase()))
                 )
                 .map((token) => {
                   const disabled =
                     (isTokenPickerOpen === 'base' && token.symbol === pairQuote) ||
                     (isTokenPickerOpen === 'quote' && token.symbol === pairBase);
+                  // Badge chain: explicit catalog chain first (registry =
+                  // mainnet, mocks = Unichain Sepolia), else the token's real
+                  // primary chain from the platform map. Only app-supported
+                  // chains get a badge (getNetworkBadgeInfo defaults unknown
+                  // ids to Sepolia — never render that for foreign chains).
+                  const supportedBadgeChains = new Set([1, 11155111, 1301, 130, 42161, 8453, 137]);
+                  const knownChain = knownChainOf(token.symbol) ?? token.chains?.[0] ?? token.chainId;
+                  const badge = knownChain !== undefined && supportedBadgeChains.has(knownChain) ? getNetworkBadgeInfo(knownChain) : null;
+
                   return (
                     <button
                       key={token.symbol}
                       disabled={disabled}
+                      className="token-row-item"
                       onClick={() => pickBuilderToken(isTokenPickerOpen, token.symbol)}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '10px',
-                        padding: '8px 10px',
-                        borderRadius: '8px',
-                        background: disabled ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.04)',
-                        border: '1px solid var(--border-color)',
-                        color: disabled ? 'var(--text-dim)' : 'var(--text-main)',
-                        cursor: disabled ? 'not-allowed' : 'pointer',
-                        textAlign: 'left',
-                        transition: 'all 0.15s ease'
-                      }}
                     >
-                      <span className="token-avatar" style={{ background: token.color ?? '#3a4354', flexShrink: 0 }}>
-                        {token.symbol.slice(0, 1)}
-                      </span>
-                      <span style={{ minWidth: 0, flex: 1 }}>
-                        <span style={{ display: 'block', fontWeight: 700, fontSize: '0.85rem' }}>{token.symbol}</span>
-                        <span style={{ display: 'block', fontSize: '0.7rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{token.name}</span>
-                      </span>
-                      <span className="font-mono" style={{ fontSize: '0.62rem', color: 'var(--text-dim)', textAlign: 'right', flexShrink: 0 }}>
-                        {disabled
-                          ? 'ON OTHER SIDE'
-                          : token.usd > 0
-                          ? `$${token.usd >= 1 ? token.usd.toLocaleString('en-US', { maximumFractionDigits: 2 }) : token.usd.toPrecision(4)}`
-                          : '—'}
-                      </span>
+                      <div className="token-icon-wrapper">
+                        {token.logoURI ? (
+                          <img
+                            src={token.logoURI}
+                            alt={token.symbol}
+                            style={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover' }}
+                            onError={(e) => {
+                              (e.currentTarget as HTMLElement).style.display = 'none';
+                              const fallback = (e.currentTarget.nextElementSibling as HTMLElement);
+                              if (fallback) fallback.style.display = 'inline-flex';
+                            }}
+                          />
+                        ) : null}
+                        <span
+                          className="token-avatar"
+                          style={{
+                            width: 32,
+                            height: 32,
+                            background: token.color ?? '#3a4354',
+                            display: token.logoURI ? 'none' : 'inline-flex',
+                          }}
+                        >
+                          {token.symbol.slice(0, 1)}
+                        </span>
+                        {badge && (
+                          <span className="network-badge-overlay" style={{ background: badge.color }} title={badge.label}>
+                            <span className="network-badge-letter" style={{ display: badge.logo ? 'none' : 'block' }}>{badge.symbol}</span>
+                            {badge.logo ? (
+                              <img
+                                src={badge.logo}
+                                alt=""
+                                onError={(e) => {
+                                  (e.currentTarget as HTMLElement).style.display = 'none';
+                                  const fallback = e.currentTarget.previousElementSibling as HTMLElement | null;
+                                  if (fallback) fallback.style.display = 'block';
+                                }}
+                              />
+                            ) : null}
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ fontWeight: 800, fontSize: '0.88rem', color: '#ffffff' }}>{token.symbol}</span>
+                          {token.address && (
+                            <span className="contract-tag">{formatTruncatedAddress(token.address)}</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {token.name}
+                        </div>
+                      </div>
+
+                      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                        {disabled ? (
+                          <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)', fontWeight: 600 }}>ON OTHER SIDE</span>
+                        ) : (
+                          <>
+                            <div className="font-mono" style={{ fontSize: '0.82rem', fontWeight: 700, color: '#ffffff' }}>
+                              {token.usd > 0
+                                ? `$${token.usd >= 1 ? token.usd.toLocaleString('en-US', { maximumFractionDigits: 2 }) : token.usd.toPrecision(4)}`
+                                : '—'}
+                            </div>
+                            {token.change24h !== null && token.change24h !== undefined && (
+                              <span className={token.change24h >= 0 ? 'change-badge-green' : 'change-badge-red'}>
+                                {token.change24h > 0 ? '+' : ''}{token.change24h.toFixed(2)}%
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </div>
                     </button>
                   );
                 })}
@@ -2123,9 +2564,7 @@ function AppContent() {
                 onClick={() => openTokenPicker('base')}
                 title={`Base token: ${pairBase} — click to change`}
               >
-                {(() => { const t = tokenBySymbol(pairBase); return t ? (
-                  <span className="token-avatar" style={{ background: t.color, width: 28, height: 28, fontSize: '0.72rem' }}>{t.symbol.slice(0, 1)}</span>
-                ) : null; })()}
+                {(() => { const t = tokenBySymbol(pairBase); return <TokenAvatar symbol={t?.symbol ?? pairBase} size={28} color={t && 'color' in t ? t.color : undefined} />; })()}
                 <span className="dex-token-label">{pairBase}</span>
                 <ChevronDown size={14} style={{ color: 'var(--text-dim)' }} />
               </button>
@@ -2145,9 +2584,7 @@ function AppContent() {
                 onClick={() => openTokenPicker('quote')}
                 title={`Quote token: ${pairQuote} — click to change`}
               >
-                {(() => { const t = tokenBySymbol(pairQuote); return t ? (
-                  <span className="token-avatar" style={{ background: t.color, width: 28, height: 28, fontSize: '0.72rem' }}>{t.symbol.slice(0, 1)}</span>
-                ) : null; })()}
+                {(() => { const t = tokenBySymbol(pairQuote); return <TokenAvatar symbol={t?.symbol ?? pairQuote} size={28} color={t && 'color' in t ? t.color : undefined} />; })()}
                 <span className="dex-token-label">{pairQuote}</span>
                 <ChevronDown size={14} style={{ color: 'var(--text-dim)' }} />
               </button>

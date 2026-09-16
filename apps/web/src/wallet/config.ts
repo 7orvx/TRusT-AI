@@ -114,24 +114,23 @@ export const ALCHEMY_API_KEY =
 
 /** Returns the RPC URL for a given chain ID (Alchemy when configured, public fallback otherwise). */
 export function getRpcUrlForChain(chainId: number): string {
-  // When an Alchemy key is available, use Alchemy's endpoints for fast, reliable rate limits.
-  const useAlchemy = Boolean(ALCHEMY_API_KEY);
-
-  if (useAlchemy) {
-    if (chainId === 11155111) return `https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-    if (chainId === 1) return `https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-    if (chainId === 42161) return `https://arb-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-    if (chainId === 8453) return `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-    if (chainId === 137) return `https://polygon-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-    if (chainId === 1301) return `https://unichain-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-  }
-
-  // Free public RPC endpoints for the supported chains.
-  if (chainId === 11155111) return 'https://rpc.sepolia.org';
-  if (chainId === 1) return 'https://eth.llamarpc.com';
-  if (chainId === 42161) return 'https://arb1.arbitrum.io/rpc';
-  if (chainId === 8453) return 'https://mainnet.base.org';
-  if (chainId === 137) return 'https://polygon-rpc.com';
+  // Alchemy keys are SERVER-side material (the Node orchestrator uses them
+  // for pool/balance reads and its own rate limits). NEVER use a browser
+  // Alchemy key here: the dashboard loops eth_call/balanceOf directly from
+  // the page and a public/free key gets 429'd within seconds — after which
+  // every subsequent browser fetch fails with an opaque CORS error (seen in
+  // the F12 console). Public endpoints below are CORS-enabled by design.
+  const useAlchemy = false;
+  // Free public RPC endpoints for browser-side reads. All verified to send
+  // `Access-Control-Allow-Origin: *` for browser fetches — llamarpc and
+  // rpc.sepolia.org do NOT (silent CORS failures), and official endpoints
+  // like arb1.arbitrum.io 429 quickly under the dashboard's polling loop.
+  // publicnode.com is permissive on both counts.
+  if (chainId === 11155111) return 'https://ethereum-sepolia-rpc.publicnode.com';
+  if (chainId === 1) return 'https://ethereum-rpc.publicnode.com';
+  if (chainId === 42161) return 'https://arbitrum-one.publicnode.com';
+  if (chainId === 8453) return 'https://base-rpc.publicnode.com';
+  if (chainId === 137) return 'https://polygon-bor-rpc.publicnode.com';
   if (chainId === 1301) return 'https://sepolia.unichain.org';
   return 'https://rpc.ankr.com';
 }
@@ -199,8 +198,16 @@ export const useWalletConnect = () => useConnect();
 /** Disconnect hook. */
 export const useWalletDisconnect = () => useDisconnect();
 
-/** Hook to switch the active chain (for the network selector). */
-export const useSwitchChainHook = () => useSwitchChain();
+/**
+ * Hook to switch the active chain (network selector + swap-time auto switch).
+ * `switchChain` is fire-and-forget; `switchChainAsync` resolves/rejects with the
+ * wallet's answer so callers can react (e.g. re-arm the swap after the wallet
+ * confirms the network change).
+ */
+export const useSwitchChainHook = () => {
+  const { switchChain, switchChainAsync } = useSwitchChain();
+  return { switchChain, switchChainAsync };
+};
 
 /** Active chain ID (number when connected, undefined otherwise). */
 export const useActiveChainId = () => {

@@ -73,6 +73,17 @@ if (!process.platform.startsWith('win')) {
 // without a shell, and shell:true triggers the DEP0190 deprecation warning.
 // Run it through cmd.exe /c instead (static args only, no shell quoting).
 const npmCmd = process.platform === 'win32' ? 'cmd.exe' : 'npm';
+// WEB BUILD FIRST (critical): the orchestrator serves the dashboard from
+// apps/web/dist (express.static). Without this step `dev:desktop` ships a
+// STALE web build — UI fixes never reach the desktop app no matter how many
+// times the source is edited (the exact "I already fixed this" trap).
+// Windows: cmd.exe /c npm ... (without /c the cmd opens INTERACTIVELY and
+// hangs the staging script — seen as the "Microsoft Windows [version]" prompt).
+run(
+  npmCmd,
+  process.platform === 'win32' ? ['/c', 'npm', 'run', 'build:web'] : ['run', 'build:web'],
+  { cwd: repoRoot }
+);
 const npmArgs = process.platform === 'win32'
   ? ['/c', 'npm', 'run', 'build:desktop']
   : ['run', 'build:desktop'];

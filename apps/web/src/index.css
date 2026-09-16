@@ -851,3 +851,216 @@ input[type="range"]::-moz-range-thumb {
   color: var(--accent-violet);
   transform: rotate(180deg);
 }
+
+/* ─── DYNAMIC MULTICHAIN TOKEN PICKER (UNISWAP DEX-GRADE) ─── */
+.token-picker-modal {
+  width: 100%;
+  max-width: 480px;
+  padding: 22px;
+  border-radius: 20px;
+  background: #111115;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7);
+}
+
+/* Search bar with contract paste support */
+.token-search-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.token-search-input {
+  width: 100%;
+  padding: 12px 14px 12px 38px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  color: #ffffff;
+  font-size: 0.88rem;
+  transition: all 0.2s ease;
+}
+
+.token-search-input:focus {
+  outline: none;
+  border-color: var(--accent-violet);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.25);
+}
+
+/* Quick Select Pills (ETH, USDC, USDT, WBTC...) */
+.quick-pills-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.quick-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  color: var(--text-main);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.quick-pill-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+  transform: translateY(-1px);
+}
+
+.quick-pill-btn.active {
+  border-color: var(--accent-cyan);
+  background: rgba(0, 212, 170, 0.12);
+  color: var(--accent-cyan);
+}
+
+/* Network Badge Overlay on Token Icons */
+.token-icon-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.network-badge-overlay {
+  position: absolute;
+  bottom: -3px;
+  right: -3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #111115;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.5rem;
+  font-weight: 900;
+  color: #fff;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+/* Official chain logo filling the badge; falls back to the letter when the
+   CDN image fails (testnets without an official asset). */
+.network-badge-overlay img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.network-badge-letter {
+  font-size: 0.45rem;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+/* Network Filter Chips Bar */
+.network-chips-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.network-chip-btn {
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.network-chip-btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-main);
+}
+
+.network-chip-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+/* Token List Row Items */
+.token-row-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-main);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  margin-bottom: 2px;
+}
+
+.token-row-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.token-row-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 24h Change Badges */
+.change-badge-green {
+  color: #38ef7d;
+  background: rgba(56, 239, 125, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.change-badge-red {
+  color: #ff3366;
+  background: rgba(255, 51, 102, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+/* Contract snippet tag */
+.contract-tag {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 1px 5px;
+  border-radius: 4px;
+  display: inline-block;
+  margin-top: 2px;
+}

@@ -76,13 +76,23 @@ const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
 //     (v4 Universal Router on Unichain mainnet — same table)
 //   - ethereum:         0x4c82d1fbfe28c977cbb58d8c7ff8fcf9f70a2cca
 //     (Universal Router 2.1.1 on Ethereum mainnet — same table)
+//   - arbitrum/base/polygon: Universal Router 2.1.1 rows of the official
+//     deployments table (docs.uniswap.org/contracts/v4/deployments) — same
+//     version family as the ethereum entry above.
 // An explicit UNISWAP_V4_ROUTER env var always wins. Networks missing from this
 // map reject v4 routes with a clear error instead of silently sending calldata
 // to the wrong contract.
+// ⚠️ Contract deployment ≠ tradable pair: the token catalog (Rust TOKEN_CATALOG
+// / TOKEN_DECIMALS / TOKEN_REGISTRY) is MAINNET-ADDRESSED, so L2 routes only
+// produce executable calldata for pairs whose tokens actually exist on the
+// target chain. Per-chain token addresses are the next catalog slice.
 const V4_ROUTER_BY_NETWORK: Record<string, `0x${string}`> = {
   'unichain-sepolia': '0xf70536b3bcc1bd1a972dc186a2cf84cc6da6be5d',
   unichain: '0xef740bf23acae26f6492b10de645d6b98dc8eaf3',
   ethereum: '0x4c82d1fbfe28c977cbb58d8c7ff8fcf9f70a2cca',
+  arbitrum: '0x8b844f885672f333bc0042cb669255f93a4c1e6b',
+  base: '0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7',
+  polygon: '0x8b844f885672f333bc0042cb669255f93a4c1e6b',
 };
 
 // v4 Quoter per network (V4Quoter lens). The synthetic simulator price (1.0 for
@@ -94,6 +104,9 @@ const V4_QUOTER_BY_NETWORK: Record<string, `0x${string}`> = {
   'unichain-sepolia': '0x56dcd40a3f2d466f48e7f48bdbe5cc9b92ae4472',
   unichain: '0x333e3c607b141b18ff6de9f258db6e77fe7491e0',
   ethereum: '0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203',
+  arbitrum: '0x3972c00f7ed4885e145823eb7c655375d275a1c5',
+  base: '0x0d5e0f971ed27fbff6c2837bf31316121532048d',
+  polygon: '0xb3d5c3dfc3a7aebff71895a7191796bffc2c81b9',
 };
 
 // Expected chain id per network key — guards the quoter RPC candidate against a
@@ -102,6 +115,9 @@ const CHAIN_ID_BY_NETWORK: Record<string, number> = {
   'unichain-sepolia': 1301,
   unichain: 130,
   ethereum: 1,
+  arbitrum: 42161,
+  base: 8453,
+  polygon: 137,
   // Sepolia only hosts the legacy v3 router (removed); v4 swaps target
   // Ethereum mainnet, Unichain and Unichain Sepolia. Kept here so the chain
   // guard can answer precisely instead of falling through.
@@ -118,7 +134,10 @@ function rpcCandidates(net: string): string[] {
   const publicRpc: Record<string, string> = {
     'unichain-sepolia': 'https://sepolia.unichain.org',
     unichain: 'https://unichain.org',
-    ethereum: 'https://eth.llamarpc.com'
+    ethereum: 'https://eth.llamarpc.com',
+    arbitrum: 'https://arb1.arbitrum.io/rpc',
+    base: 'https://mainnet.base.org',
+    polygon: 'https://polygon-rpc.com'
   };
   const fallback = publicRpc[net];
   if (fallback) list.push(fallback);
@@ -195,14 +214,18 @@ async function quoteV4Output(
 
 // v4 PoolManager per network — used for the pool id derivation and echoed to
 // the dashboard so it can validate hook permissions (getHookPermissions) on the
-// right contract before a swap:
+// right contract before a swap (addresses from the official deployments table):
 //   - unichain-sepolia: 0x00b036b58a818b1bc34d502d3fe730db729e62ac
 //   - unichain:         0x1f98400000000000000000000000000000000004
 //   - ethereum:         0x000000000004444c5dc75cB358380D2e3dE08A90
+//   - arbitrum/base/polygon: see docs.uniswap.org/contracts/v4/deployments
 const V4_POOL_MANAGER_BY_NETWORK: Record<string, `0x${string}`> = {
   'unichain-sepolia': '0x00b036b58a818b1bc34d502d3fe730db729e62ac',
   unichain: '0x1f98400000000000000000000000000000000004',
   ethereum: '0x000000000004444c5dc75cB358380D2e3dE08A90',
+  arbitrum: '0x360e68faccca8ca495c1b759fd9eee466db9fb32',
+  base: '0x498581ff718922c3f8e6a244956af099b2652b2b',
+  polygon: '0x67366782805870060151383f4bbff9dab53e5cd6',
 };
 
 // Decimals of the tokens the engine catalog can emit in MarketTrigger payloads
@@ -250,9 +273,79 @@ const TOKEN_BY_SYMBOL: Record<string, `0x${string}`> = {
   'mUSDC': '0xD1F4C92Fa1436aB2D110a02Df56224Ed0A4f5860',
 };
 
+// Reverse lookup: catalog address (lowercased) → symbol. Used by the
+// multichain resolver below to translate the mainnet-addressed trigger tokens
+// into the target chain's contracts.
+const SYMBOL_BY_ADDRESS: Record<string, string> = Object.fromEntries(
+  Object.entries(TOKEN_BY_SYMBOL).map(([sym, addr]) => [addr.toLowerCase(), sym])
+);
+
+// Multichain token catalog — VERIFIED per-chain contracts for the L2 v4 routes
+// (source: the official Uniswap Token List, tokens.uniswap.org — mainnet rows
+// match TOKEN_BY_SYMBOL exactly, which is how the source was cross-checked).
+// Chains not listed here (ethereum/unichain/unichain-sepolia) keep the
+// mainnet-addressed trigger behavior — the engine catalog is mainnet-based and
+// the Unichain Sepolia playground resolves its own mock tokens.
+// Gaps are DELIBERATE: USDT is not in the official list on Arbitrum/Base and
+// WBTC/LDO are absent on Base/Polygon — unverified addresses are never guessed.
+const TOKEN_ADDRESS_BY_CHAIN: Record<number, Record<string, `0x${string}`>> = {
+  42161: { // Arbitrum One
+    WETH: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
+    WBTC: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f',
+    USDC: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', // native USDC
+    LINK: '0xf97f4df75117a78c1A5a0DBb814Af92458539FB4',
+    UNI: '0xFa7F8980b0f1E64A2062791cc3b0871572f1F7f0',
+    DAI: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1',
+    LDO: '0x13Ad51ed4F1B7e9Dc168d8a00cB3f4dDD85EfA60',
+    AAVE: '0xba5DdD1f9d7F570dc94a51479a000E3BCE967196',
+  },
+  8453: { // Base
+    WETH: '0x4200000000000000000000000000000000000006',
+    USDC: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // native USDC
+    UNI: '0xc3De830EA07524a0761646a6a4e4be0e114a3C83',
+    DAI: '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb',
+    AAVE: '0x63706e401c06ac8513145b7687A14804d17f814b',
+  },
+  137: { // Polygon PoS
+    WETH: '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',
+    WBTC: '0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6',
+    USDC: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', // native USDC
+    USDT: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F',
+    LINK: '0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39',
+    UNI: '0xb33EaAd8d922B1083446DC23f610c2567fB5180f',
+    DAI: '0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063',
+    AAVE: '0xD6DF932A45C0f255f85145f286eA0b292B21C90B',
+  },
+};
+
+/**
+ * Resolves the token contract to encode for the target chain. On real-value
+ * L2s (Arbitrum/Base/Polygon) the mapping is STRICT: an unmapped token throws
+ * so the decision degrades to a swap-less broadcast instead of encoding
+ * mainnet addresses into calldata that would revert on-chain (wasted gas).
+ */
+function resolveChainToken(chainId: number | undefined, address: string): `0x${string}` {
+  if (chainId !== 42161 && chainId !== 8453 && chainId !== 137) {
+    return address.toLowerCase() as `0x${string}`;
+  }
+  const sym = SYMBOL_BY_ADDRESS[address.toLowerCase()];
+  const mapped = sym ? TOKEN_ADDRESS_BY_CHAIN[chainId]?.[sym] : undefined;
+  if (!mapped) {
+    throw new Error(
+      `Token ${sym ?? address} has no verified contract on chain ${chainId} in the TRusT-AI catalog. ` +
+      `The decision still streams — pick a pair supported on this network to execute.`
+    );
+  }
+  return mapped.toLowerCase() as `0x${string}`;
+}
+
 function getTokenDecimals(address: string): number {
   const decimals = TOKEN_DECIMALS[address.toLowerCase()];
   if (decimals === undefined) {
+    // Strict on purpose: encoding amountIn/amountOutMinimum with guessed
+    // decimals produces amounts that are orders of magnitude wrong (a 6-dec
+    // token read as 18 = 1e12× oversized). Fail the decision loudly instead —
+    // withSwapData degrades to a swap-less broadcast and the invariant holds.
     throw new Error(`Unknown token decimals for address ${address}. Add it to TOKEN_DECIMALS or include decimals in the trigger.`);
   }
   return decimals;
@@ -459,6 +552,14 @@ export async function getUniswapSwapData(
   );
 
   const { net, networkLabel } = resolveNetwork(trigger);
+  // Multichain catalog: on Arbitrum/Base/Polygon the trigger's mainnet
+  // addresses are translated into the target chain's verified contracts
+  // (throws for unmapped tokens — see resolveChainToken). Decimals stay keyed
+  // to the original catalog address: a symbol's decimals are identical across
+  // the supported chains, and the L2 addresses are not in TOKEN_DECIMALS.
+  const routeChainId = CHAIN_ID_BY_NETWORK[net];
+  const chainTokenIn = resolveChainToken(routeChainId, effectiveTokenIn);
+  const chainTokenOut = resolveChainToken(routeChainId, effectiveTokenOut);
 
   // ── v4 route: Universal Router command encoding (the only route) ──────────
   {
@@ -486,7 +587,7 @@ export async function getUniswapSwapData(
     let minOutLabel = 'minOut synthetic';
     if (V4_QUOTER_BY_NETWORK[net]) {
       const quoted = await quoteV4Output(
-        net, effectiveTokenInNorm, effectiveTokenOutNorm, amountInWei, fee, tickSpacing, hooksAddress
+        net, chainTokenIn, chainTokenOut, amountInWei, fee, tickSpacing, hooksAddress
       );
       if (quoted !== null) {
         effectiveMinOut = (quoted * BigInt(10000 - Math.min(maxSlippageBps, 9999))) / 10000n;
@@ -495,8 +596,8 @@ export async function getUniswapSwapData(
     }
 
     const { calldata, poolId, zeroForOne } = encodeV4SwapCalldata({
-      tokenIn: effectiveTokenInNorm,
-      tokenOut: effectiveTokenOutNorm,
+      tokenIn: chainTokenIn,
+      tokenOut: chainTokenOut,
       amountInWei,
       amountOutMinWei: effectiveMinOut,
       fee,
@@ -523,7 +624,7 @@ export async function getUniswapSwapData(
       router_name: `Uniswap v4 Universal Router (${networkLabel})`,
       wallet_chain_id: CHAIN_ID_BY_NETWORK[net],
       protocol: 'v4',
-      token_in_address: effectiveTokenInNorm,
+      token_in_address: chainTokenIn,
       amount_in_wei: amountInWei.toString(),
       permit2_address: PERMIT2_ADDRESS,
       v4_pool_manager_address: poolManager,

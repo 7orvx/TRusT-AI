@@ -16,11 +16,15 @@ import { createPublicClient, http, encodeFunctionData, decodeFunctionResult } fr
 import { rpcConfig } from './index.js';
 
 // v4 PoolManager per network — mirrors V4_POOL_MANAGER_BY_NETWORK in
-// uniswapApi.ts (keep in sync).
+// uniswapApi.ts (keep in sync; L2 addresses from the official deployments
+// table at docs.uniswap.org/contracts/v4/deployments).
 const V4_POOL_MANAGER_BY_NETWORK: Record<string, `0x${string}`> = {
   'unichain-sepolia': '0x00b036b58a818b1bc34d502d3fe730db729e62ac',
   unichain: '0x1f98400000000000000000000000000000000004',
   ethereum: '0x000000000004444c5dc75cB358380D2e3dE08A90',
+  arbitrum: '0x360e68faccca8ca495c1b759fd9eee466db9fb32',
+  base: '0x498581ff718922c3f8e6a244956af099b2652b2b',
+  polygon: '0x67366782805870060151383f4bbff9dab53e5cd6',
 };
 
 // Expected chain id per network key — guards the RPC candidate against a
@@ -29,6 +33,9 @@ const CHAIN_ID_BY_NETWORK: Record<string, number> = {
   'unichain-sepolia': 1301,
   unichain: 130,
   ethereum: 1,
+  arbitrum: 42161,
+  base: 8453,
+  polygon: 137,
 };
 
 // Well-known public RPC fallbacks when the dashboard link is unset/mismatched
@@ -37,6 +44,9 @@ const PUBLIC_RPC_BY_NETWORK: Record<string, string> = {
   'unichain-sepolia': 'https://sepolia.unichain.org',
   unichain: 'https://unichain.org',
   ethereum: 'https://eth.llamarpc.com',
+  arbitrum: 'https://arb1.arbitrum.io/rpc',
+  base: 'https://mainnet.base.org',
+  polygon: 'https://polygon-rpc.com',
 };
 
 // Per-token decimals + mainnet addresses (mirrors TOKEN_DECIMALS in

@@ -166,6 +166,76 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// CoinGecko CORS relay — the browser cannot call api.coingecko.com directly
+// (the free API does not send Access-Control-Allow-Origin for localhost
+// origins), so the dashboard routes its UI price fetches through this proxy.
+// Server-side the request has no origin restrictions. Nothing is cached or
+// persisted here (zero-storage) — it is a pass-through with a small timeout.
+// Only allowlist the two paths the dashboard actually uses (no open proxy).
+const COINGECKO_API_BASE = 'https://api.coingecko.com/api/v3';
+// Small in-memory TTL cache shared by both relays. CoinGecko's free tier is
+// IP-based and strict: the dashboard's 12s price loop plus the top-100 picker
+// can exhaust it in under a minute. Caching collapses repeated client calls
+// into at most one upstream request per TTL window, and a still-remembered
+// stale entry is served when upstream answers 429 (the UI keeps real prices
+// during bursts instead of degrading to simulated numbers).
+const coingeckoCache = new Map<string, { at: number; body: unknown }>();
+async function relayCoinGecko(path: string, ttlMs: number, timeoutMs: number): Promise<unknown> {
+  const cached = coingeckoCache.get(path);
+  if (cached && Date.now() - cached.at < ttlMs) return cached.body;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const upstream = await fetch(`${COINGECKO_API_BASE}${path}`, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
+    if (!upstream.ok) {
+      console.warn(`[CoinGecko relay] upstream ${upstream.status} for ${path.split('?')[0]}`);
+      if (upstream.status === 429 && cached) return cached.body; // stale but real
+      throw new Error(String(upstream.status));
+    }
+    const body = await upstream.json();
+    coingeckoCache.set(path, { at: Date.now(), body });
+    return body;
+  } finally {
+    clearTimeout(t);
+  }
+}
+app.get('/api/coingecko/simple/price', async (req, res) => {
+  try {
+    const ids = String(req.query.ids ?? '');
+    if (!ids || ids.length > 2000) return res.status(400).json({ error: 'invalid ids' });
+    const body = await relayCoinGecko(`/simple/price?ids=${encodeURIComponent(ids)}&vs_currencies=usd&include_24hr_change=true`, 60_000, 10_000);
+    return res.json(body);
+  } catch (e) {
+    console.warn('[CoinGecko relay] simple/price failed:', (e as Error).message);
+    return res.status(502).json({ error: 'coingecko relay failed' });
+  }
+});
+app.get('/api/coingecko/coins/markets', async (req, res) => {
+  try {
+    const perPage = Math.min(Math.max(parseInt(String(req.query.per_page ?? '100'), 10) || 100, 1), 250);
+    const body = await relayCoinGecko(`/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${perPage}&page=1&price_change_percentage=24h`, 300_000, 15_000);
+    return res.json(body);
+  } catch (e) {
+    console.warn('[CoinGecko relay] coins/markets failed:', (e as Error).message);
+    return res.status(502).json({ error: 'coingecko relay failed' });
+  }
+});
+// CoinGecko id → per-chain contract map. Powers the token picker's honest
+// chainId attribution (badges/filters). One upstream call, cached ~6h — the
+// payload is large (~5 MB) so it must never be fetched per client request.
+app.get('/api/coingecko/coins/list', async (req, res) => {
+  try {
+    if (String(req.query.include_platform ?? '') !== 'true') {
+      return res.status(400).json({ error: 'include_platform=true required' });
+    }
+    const body = await relayCoinGecko('/coins/list?include_platform=true', 6 * 60 * 60_000, 30_000);
+    return res.json(body);
+  } catch (e) {
+    console.warn('[CoinGecko relay] coins/list failed:', (e as Error).message);
+    return res.status(502).json({ error: 'coingecko relay failed' });
+  }
+});
+
 // Endpoint called by the Rust Engine
 app.post('/api/trigger', async (req, res) => {
   const trigger: MarketTrigger = req.body;
@@ -254,7 +324,15 @@ app.post('/api/trigger', async (req, res) => {
 // Settings update endpoint called by the dashboard frontend
 app.post('/api/settings', (req, res) => {
   const { provider, apiKey, pause, maxSlippage, pair, analysisInterval, maxTradeAmount, rpcUrl, rpcProvider, rpcNetwork } = req.body;
+  // Echo origin id (optional): the pushing client's instance id. Broadcast
+  // carries it so OTHER dashboard instances can ignore echoes of their own
+  // pushes vs. re-apply real third-party changes (single-writer pair flow).
+  const changedBy = typeof req.body.changedBy === 'string' ? req.body.changedBy : undefined;
 
+  // Snapshot of the pair BEFORE this request's mutations — used both for the
+  // human-readable diff in the log below and to detect a later concurrent
+  // request whose stale broadcast would overwrite a newer value.
+  const oldPair = selectedPair;
   if (provider) currentProvider = provider;
   if (typeof apiKey === 'string') currentApiKey = apiKey;
   if (typeof pause === 'boolean') emergencyPause = pause;
@@ -311,12 +389,24 @@ app.post('/api/settings', (req, res) => {
   if (typeof req.body.v4HookPermissions === 'string') {
     routeConfig.v4HookPermissions = req.body.v4HookPermissions.slice(0, 400);
   }
-  console.log(`⚙️ [Config] Settings updated: Provider=${currentProvider}, Pair=${selectedPair}, Interval=${analysisIntervalMs/1000}s, Pause=${emergencyPause}, MaxSlippage=${maxSlippageBps}bps, MaxBudget=${maxTradeAmountEth} ${pairBaseSymbol(selectedPair)}, Route=v4 (fee=${routeConfig.v4Fee}, tick=${routeConfig.v4TickSpacing}, hook=${routeConfig.v4HooksAddress || 'none'})${rpcConfig.configured ? `, RPC=${rpcConfig.provider}/${rpcConfig.network}` : ''}`);
+  console.log(`⚙️ [Config] Settings updated: Provider=${currentProvider}, Pair=${oldPair !== selectedPair ? `${oldPair} → ${selectedPair}` : selectedPair}, Interval=${analysisIntervalMs/1000}s, Pause=${emergencyPause}, MaxSlippage=${maxSlippageBps}bps, MaxBudget=${maxTradeAmountEth} ${pairBaseSymbol(selectedPair)}, Route=v4 (fee=${routeConfig.v4Fee}, tick=${routeConfig.v4TickSpacing}, hook=${routeConfig.v4HooksAddress || 'none'})${rpcConfig.configured ? `, RPC=${rpcConfig.provider}/${rpcConfig.network}` : ''}`);
   if (provider === 'mock_pair') {
     console.log('🧪 [Mock Pair] Unichain Sepolia mUSDC/mUSDT playground enabled. Synthesizes signals for the deployed mock pools (user-deployed v4 pool — route selected in the dashboard.');
   }
   console.log(`⚙️ [Config] activeProvider now=${currentProvider} selectedPair=${selectedPair} intervalMs=${analysisIntervalMs}`);
 
+  // Concurrency guard: two rapid POSTs (user clicks twice / pair+network
+  // pushes land back-to-back) run on the event queue sequentially, but the
+  // LATER request still broadcasts the pair it SAW at its start if reads were
+  // hoisted into destructuring. Re-read the authoritative value at broadcast
+  // time so the WebSocket payload can never lag the in-memory state.
+  const pairToBroadcast = selectedPair;
+  // SINGLE-WRITER pair echo: only flag pairChanged when THIS request moved
+  // the value. Echoes that merely confirm the current pair carry
+  // pairChanged=false so NO connected client ever re-applies (and re-pushes)
+  // a value it already has — two dashboards (desktop WebView + browser tab)
+  // both polling settings can otherwise ping-pong each other forever.
+  const pairChanged = pairToBroadcast !== oldPair;
   broadcast({
     type: 'SETTINGS_UPDATED',
     payload: {
@@ -325,7 +415,9 @@ app.post('/api/settings', (req, res) => {
       emergencyPause,
       maxSlippageBps,
       maxTradeAmountEth,
-      selectedPair,
+      selectedPair: pairToBroadcast,
+      pairChanged,
+      changedBy,
       analysisIntervalSec: Math.round(analysisIntervalMs / 1000),
       routeProtocol: routeConfig.protocol,
       v4Fee: routeConfig.v4Fee,
