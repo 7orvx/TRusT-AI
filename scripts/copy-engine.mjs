@@ -15,14 +15,33 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 
-const sourceCandidates = [
-  path.join(repoRoot, 'crates/engine/target/release/trust-ai-engine.exe'),
-  path.join(repoRoot, 'crates/engine/target/x86_64-pc-windows-gnu/release/trust-ai-engine.exe')
+const targetRoots = [
+  ...(process.env.CARGO_TARGET_DIR ? [path.resolve(process.env.CARGO_TARGET_DIR)] : []),
+  path.join(repoRoot, 'target'),
+  path.join(repoRoot, 'crates/engine/target')
 ];
+
+const subPaths = [
+  'release/trust-ai-engine.exe',
+  'x86_64-pc-windows-msvc/release/trust-ai-engine.exe',
+  'x86_64-pc-windows-gnu/release/trust-ai-engine.exe'
+];
+
+const sourceCandidates = [];
+for (const root of targetRoots) {
+  for (const sub of subPaths) {
+    sourceCandidates.push(path.join(root, sub));
+  }
+}
+
 const source = sourceCandidates.find((p) => existsSync(p));
 
 if (!source) {
-  console.error('[copy-engine] No Windows engine binary found. Build it first:');
+  console.error('[copy-engine] No Windows engine binary found. Checked candidates:');
+  for (const candidate of sourceCandidates) {
+    console.error(`  - ${candidate}`);
+  }
+  console.error('Build it first:');
   console.error('  Windows: npm run build:engine');
   console.error('  WSL:     npm run build:engine:windows   (needs mingw-w64, see README)');
   process.exit(1);
