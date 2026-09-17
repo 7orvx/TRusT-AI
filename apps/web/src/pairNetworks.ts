@@ -102,17 +102,21 @@ export const isMockPair = (base: string, quote: string): boolean => isMockSymbol
  * Default execution network key for a pair — mirrors the SERVER's
  * resolveNetwork() fallback chain (apps/server/src/uniswapApi.ts) so the web
  * preview and the actual route never diverge:
- *   mock pair → unichain-sepolia; ETH base → ethereum; BTC base → ethereum;
+ *   mock pair → unichain-sepolia; ETH/BTC (native or wrapped) base → ethereum;
  *   otherwise the highest-id chain where BOTH sides are tradable (Polygon →
  *   Base → Arbitrum → Ethereum is the L2-first preference), falling back to
  *   ethereum when the coverage map has no exact match.
+ * Native aliases (ETH/BTC) are canonicalized to their wrapped catalog symbols
+ * (WETH/WBTC) before the coverage lookup — the per-chain maps only carry
+ * wrapped contracts.
  */
 export function pickNetworkForPair(base: string, quote: string): string | undefined {
   if (isMockPair(base, quote)) return 'unichain-sepolia';
+  const canonicalBase = base === 'ETH' ? 'WETH' : base === 'BTC' ? 'WBTC' : base;
   if (base === 'ETH' || base === 'BTC' || base === 'WETH' || base === 'WBTC') return 'ethereum';
   const candidates = [137, 8453, 42161, 1]; // L2-first preference
   for (const chainId of candidates) {
-    if (pairSupportedOnChain(base, quote, chainId)) return networkKeyForChainId(chainId);
+    if (pairSupportedOnChain(canonicalBase, quote, chainId)) return networkKeyForChainId(chainId);
   }
   return 'ethereum';
 }

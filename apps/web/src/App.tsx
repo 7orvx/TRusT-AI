@@ -336,6 +336,20 @@ function knownChainOf(symbol: string): number | undefined {
   return undefined;
 }
 
+// Best-effort execution chain for a pair: the persisted picker tab when it
+// still supports BOTH sides, else the pair's default chain. The stored tab is
+// what the user actually picked (pickNetworkForPair alone ignores their tab
+// choice and would flip a Base-picked UNI/USDC back to Polygon).
+function storedOrDefaultChainKeyForPair(base: string, quote: string): string | undefined {
+  try {
+    const stored = parseInt(localStorage.getItem('trust_ai_pair_chain') ?? '', 10);
+    if (!Number.isNaN(stored) && tokenSupportedOnChain(base, stored) && tokenSupportedOnChain(quote, stored)) {
+      return networkKeyForChainId(stored);
+    }
+  } catch { /* private mode */ }
+  return pickNetworkForPair(base, quote);
+}
+
 // Presentation-only avatar: official token logo with a colored letter
 // fallback. Purely cosmetic — symbols/addresses (the identifiers shared with
 // the Rust engine and the server) are never derived from this component.
@@ -776,6 +790,30 @@ function AppContent() {
   }, [budgetSymbol, budgetsByToken]);
   
   const [latestEvent, setLatestEvent] = useState<EventLog | null>(null);
+
+  // ── Signal/pair coherence ────────────────────────────────────────────────
+  // The engine streams the pair it last resolved; right after the user picks
+  // a new pair there is a window where NEW_DECISION payloads still carry the
+  // OLD pair. A stale-pair signal must NEVER drive the AI Signal card (it
+  // used to leave the mUSDT/mUSDC playground route rendered under LINK/USDC
+  // icons). Mock tokens are special-cased: the playground pair is only
+  // coherent when explicitly selected — a synthetic BUY leaking under any
+  // other pair header is exactly the confusion this guard kills.
+  const MOCK_PAIR_SYMBOLS = new Set(['MUSDC', 'MUSDT']);
+  const signalPairMatchesSelection = (signalPair: string, selected: string): boolean => {
+    if (!signalPair) return true;
+    const norm = (s: string) => s.trim().toUpperCase();
+    const [sigBase, sigQuote] = norm(signalPair).split('/');
+    const [selBase, selQuote] = norm(selected).split('/');
+    const sigIsMock = !!sigBase && !!sigQuote && MOCK_PAIR_SYMBOLS.has(sigBase) && MOCK_PAIR_SYMBOLS.has(sigQuote);
+    if (sigIsMock) return selBase === sigBase && selQuote === sigQuote;
+    if (selected === 'ALL') return true;
+    if (!sigBase || !sigQuote || !selBase || !selQuote) return norm(signalPair) === norm(selected);
+    return sigBase === selBase && sigQuote === selQuote;
+  };
+  // Whether the displayed signal belongs to the pair currently on screen
+  // ('ALL' shows every real pair; the mock pair only when it is selected).
+  const signalIsCurrent = !latestEvent || signalPairMatchesSelection(latestEvent.trigger.pair, selectedPair);
   const [logs, setLogs] = useState<EventLog[]>([]);
 
   // Dynamic token universe for the picker: top ~100 tokens by market cap
@@ -1243,14 +1281,21 @@ function AppContent() {
             // Suppressed decisions are counted and surfaced after release.
             if (swapInFlightRef.current) {
               setSkippedSignalCount((c) => c + 1);
-            } else {
-              // Fresh signal: unhide the swap card and drop any stale tx banner
-              // (it belonged to the previous signal's card).
+            } else if (signalPairMatchesSelection(newLog.trigger.pair, selectedPairRef.current)) {
+              // Fresh signal for the SELECTED pair: unhide the swap card and
+              // drop any stale tx banner (it belonged to the previous
+              // signal's card).
               setDismissedEventId(null);
               setTxStatus('idle');
               setTxStep(null);
               setActiveTxHash(null);
               setLatestEvent(newLog);
+            } else {
+              // Signal for a pair other than the one selected (the engine
+              // stream still resolves the previous monitored_pair): feed-only.
+              // Setting it as latestEvent used to leave the PREVIOUS pair's
+              // route/decision rendered under the new pair's icons.
+              setSkippedSignalCount((c) => c + 1);
             }
             // Phase 4 — the server stamps the decision with the live price
             // source (pool / coingecko / synthetic); surface it on the monitor.
@@ -1670,10 +1715,11 @@ function AppContent() {
   // and re-echo forever (server ping-pong). User actions (pair picker, flip,
   // preset chips) always push explicitly and update pushedPairRef.
   useEffect(() => {
-    if (selectedPair !== 'ALL' && pushedPairRef.current !== selectedPair) {
-      pushedPairRef.current = selectedPair;
-      handleUpdateSettings(undefined, undefined, undefined, undefined, selectedPair);
-    }
+    // ORDER MATTERS: the saved RPC link is pushed FIRST, the pair's network
+    // SECOND. The server applies whichever rpcNetwork lands last — pushing
+    // the RPC link afterwards used to overwrite the pair's freshly-set
+    // network with the link's stale stored network (e.g. 'sepolia'), and
+    // every route label fell back to UNICHAIN-SEPOLIA again.
     try {
       const raw = localStorage.getItem('trust_ai_rpc');
       if (raw) {
@@ -1689,6 +1735,22 @@ function AppContent() {
     } catch {
       /* ignore malformed storage */
     }
+    if (selectedPair !== 'ALL' && pushedPairRef.current !== selectedPair) {
+      pushedPairRef.current = selectedPair;
+      // Push the pair's EXECUTION NETWORK together with the pair: the server's
+      // route label, calldata network and live-price pool all derive from it.
+      // Without this, a pair restored after a server restart fell back to
+      // .env NETWORK_NAME (sepolia → UNICHAIN-SEPOLIA on every route label).
+      // rpcNetwork without an rpcUrl is applied standalone server-side and
+      // never touches a saved RPC link.
+      if (selectedPair.includes('/')) {
+        const [b, q] = selectedPair.split('/');
+        const netKey = pairChainKey ?? storedOrDefaultChainKeyForPair(b, q);
+        handleUpdateSettings(undefined, undefined, undefined, undefined, selectedPair, undefined, undefined, netKey ? { rpcNetwork: netKey } : undefined);
+      } else {
+        handleUpdateSettings(undefined, undefined, undefined, undefined, selectedPair);
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPair]);
 
@@ -1701,7 +1763,7 @@ function AppContent() {
       const [b, q] = selectedPair.split('/');
       setPairBase(b);
       setPairQuote(q);
-      setPairChainKey((cur) => cur ?? pickNetworkForPair(b, q) ?? null);
+      setPairChainKey((cur) => cur ?? storedOrDefaultChainKeyForPair(b, q) ?? null);
     }
   }, [selectedPair]);
 
@@ -1804,7 +1866,16 @@ function AppContent() {
     const [b, q] = selectedPair.split('/');
     const chainId = isMockPair(b, q) ? MOCK_PAIR_CHAIN_ID : knownChainOf(b) ?? knownChainOf(q);
     if (chainId === undefined) return;
-    try { localStorage.setItem('trust_ai_pair_chain', String(chainId)); } catch { /* private mode */ }
+    try {
+      // Don't clobber a user-picked tab that still supports the pair: the
+      // mainnet-derived chain id used to overwrite e.g. a Base pick after
+      // every pair change/echo, and the next reload silently restored the
+      // Ethereum tab. Only fill the storage when it is empty/stale.
+      const stored = parseInt(localStorage.getItem('trust_ai_pair_chain') ?? '', 10);
+      const storedSupportsPair = !Number.isNaN(stored)
+        && tokenSupportedOnChain(b, stored) && tokenSupportedOnChain(q, stored);
+      if (!storedSupportsPair) localStorage.setItem('trust_ai_pair_chain', String(chainId));
+    } catch { /* private mode */ }
   }, [selectedPair]);
 
   return (
@@ -2192,7 +2263,9 @@ function AppContent() {
                   Select {isTokenPickerOpen === 'base' ? 'Base' : 'Quote'} Token
                 </h2>
                 <div style={{ fontSize: '0.73rem', color: 'var(--text-dim)', marginTop: '2px' }}>
-                  Search by symbol, name, or paste contract address (0x…)
+                  {selectedNetworkFilter === 'ALL'
+                    ? 'Search by symbol, name, or paste contract address (0x…)'
+                    : `Searching on ${pickerNetworkLabel(selectedNetworkFilter)} — pairs built here execute on this network`}
                 </div>
               </div>
               <button onClick={() => setIsTokenPickerOpen(false)} style={{ background: 'rgba(255,255,255,0.06)', border: 'none', color: 'var(--text-muted)', width: '28px', height: '28px', borderRadius: '50%', cursor: 'pointer', fontSize: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -2220,17 +2293,24 @@ function AppContent() {
               )}
             </div>
 
-            {/* Quick Select Pills (ETH, USDC, USDT, WBTC...) with Network Badge Overlay */}
+            {/* Quick Select Pills (WETH, USDC, USDT, WBTC...) with Network
+                Badge Overlay. On a network tab only tokens with a verified
+                contract on THAT chain are shown, and the badge mirrors the tab
+                (same as the token list). On 'ALL' they keep the Ethereum badge
+                as the canonical launchpad chain. */}
             <div className="quick-pills-container">
               {[
-                { symbol: 'ETH', name: 'Ethereum', color: '#627eea', chainId: 1 },
+                { symbol: 'WETH', name: 'Wrapped Ether', color: '#627eea', chainId: 1 },
                 { symbol: 'USDC', name: 'USD Coin', color: '#2775ca', chainId: 1 },
                 { symbol: 'USDT', name: 'Tether USD', color: '#26a17b', chainId: 1 },
                 { symbol: 'WBTC', name: 'Wrapped Bitcoin', color: '#f7931a', chainId: 1 },
                 { symbol: 'LINK', name: 'Chainlink', color: '#2a5ada', chainId: 1 },
                 { symbol: 'UNI', name: 'Uniswap', color: '#ff007a', chainId: 1 },
-              ].map((pill) => {
-                const badge = getNetworkBadgeInfo(pill.chainId);
+              ]
+                .filter((pill) => selectedNetworkFilter === 'ALL' || tokenSupportedOnChain(pill.symbol, selectedNetworkFilter))
+                .map((pill) => {
+                const pillChain = selectedNetworkFilter === 'ALL' ? pill.chainId : selectedNetworkFilter;
+                const badge = getNetworkBadgeInfo(pillChain);
                 const isActive = (isTokenPickerOpen === 'base' ? pairBase : pairQuote) === pill.symbol;
                 const logoUrl = TOKEN_LOGOS[pill.symbol];
                 return (
@@ -2384,13 +2464,20 @@ function AppContent() {
                   const disabled =
                     (isTokenPickerOpen === 'base' && token.symbol === pairQuote) ||
                     (isTokenPickerOpen === 'quote' && token.symbol === pairBase);
-                  // Badge chain: explicit catalog chain first (registry =
-                  // mainnet, mocks = Unichain Sepolia), else the token's real
-                  // primary chain from the platform map. Only app-supported
-                  // chains get a badge (getNetworkBadgeInfo defaults unknown
-                  // ids to Sepolia — never render that for foreign chains).
+                  // Badge chain: when a network tab is active, the badge
+                  // shows THAT chain (the same symbol has a verified per-chain
+                  // contract — TOKEN_ADDRESS_BY_CHAIN — so the overlay reflects
+                  // where the pair will execute). On 'ALL', registry/mocks keep
+                  // their catalog chain (mainnet / Unichain Sepolia) and
+                  // dynamic tokens show their real primary chain from the
+                  // CoinGecko platform map. Only app-supported chains get a
+                  // badge (getNetworkBadgeInfo defaults unknown ids to Sepolia
+                  // — never render that for foreign chains).
                   const supportedBadgeChains = new Set([1, 11155111, 1301, 130, 42161, 8453, 137]);
-                  const knownChain = knownChainOf(token.symbol) ?? token.chains?.[0] ?? token.chainId;
+                  const knownChain =
+                    selectedNetworkFilter !== 'ALL'
+                      ? selectedNetworkFilter
+                      : knownChainOf(token.symbol) ?? token.chains?.[0] ?? token.chainId;
                   const badge = knownChain !== undefined && supportedBadgeChains.has(knownChain) ? getNetworkBadgeInfo(knownChain) : null;
 
                   return (
@@ -2557,7 +2644,7 @@ function AppContent() {
                 <Activity size={16} style={{ color: 'var(--accent-violet)' }} />
                 <span>AI SIGNAL</span>
               </div>
-              {latestEvent && (
+              {latestEvent && signalIsCurrent && (
                 <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
                   Block #{latestEvent.trigger.block_number}
                 </span>
@@ -2603,9 +2690,9 @@ function AppContent() {
               <span
                 style={{
                   fontSize: '1.8rem', fontWeight: 900, letterSpacing: '-0.5px',
-                  color: (latestEvent?.decision.action || 'HOLD') === 'BUY'
+                  color: (signalIsCurrent && latestEvent ? latestEvent.decision.action : 'HOLD') === 'BUY'
                     ? 'var(--accent-green)'
-                    : (latestEvent?.decision.action || 'HOLD') === 'SELL'
+                    : (signalIsCurrent && latestEvent ? latestEvent.decision.action : 'HOLD') === 'SELL'
                     ? 'var(--accent-magenta)'
                     : 'var(--accent-amber)'
                 }}
@@ -2626,24 +2713,24 @@ function AppContent() {
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: 600 }}>
                 <span>Confidence</span>
                 <span style={{ color: '#ffffff', fontWeight: 700 }}>
-                  {latestEvent ? `${(latestEvent.decision.confidence * 100).toFixed(0)}%` : '91%'}
+                  {latestEvent && signalIsCurrent ? `${(latestEvent.decision.confidence * 100).toFixed(0)}%` : '91%'}
                 </span>
               </div>
               <div className="confidence-bar-bg">
                 <div
                   className="confidence-bar-fill"
-                  style={{ width: latestEvent ? `${(latestEvent.decision.confidence * 100).toFixed(0)}%` : '91%' }}
+                  style={{ width: latestEvent && signalIsCurrent ? `${(latestEvent.decision.confidence * 100).toFixed(0)}%` : '91%' }}
                 />
               </div>
             </div>
 
             {/* AI Reasoning Padded Quote Box */}
             <div style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.06)', padding: '16px', borderRadius: '10px', fontSize: '0.88rem', lineHeight: '1.5', color: 'var(--text-main)', marginBottom: '22px' }}>
-              {latestEvent?.decision.reasoning || `Sell pressure identified at block #${liveBlockNumber || '19845092'}. Performing automatic risk rebalancing to protect capital.`}
+              {(latestEvent && signalIsCurrent ? latestEvent.decision.reasoning : '') || `Sell pressure identified at block #${liveBlockNumber || '19845092'}. Performing automatic risk rebalancing to protect capital.`}
             </div>
 
             {/* Primary Action Button: Confirm Swap — only shown on BUY/SELL */}
-            {latestEvent && (latestEvent.decision.action === 'BUY' || latestEvent.decision.action === 'SELL') ? (
+            {latestEvent && signalIsCurrent && (latestEvent.decision.action === 'BUY' || latestEvent.decision.action === 'SELL') ? (
               <>
                 <button
                   className={`swap-btn ${txStatus === 'pending' ? 'pending' : ''}`}
@@ -2699,17 +2786,31 @@ function AppContent() {
                 background: 'rgba(255, 255, 255, 0.03)', border: '1px dashed rgba(255,255,255,0.10)',
                 color: 'var(--text-dim)', fontSize: '0.88rem', fontWeight: 600
               }}>
-                {latestEvent?.decision.action === 'HOLD'
+                {!latestEvent || !signalIsCurrent
+                  ? '⏳ Waiting for AI signal…'
+                  : latestEvent.decision.action === 'HOLD'
                   ? '⏸ HOLD — No swap recommended'
                   : '⏳ Waiting for AI signal…'}
               </div>
             )}
 
-            {/* Route Info & Calldata expander */}
-            {latestEvent?.decision.uniswap_swap_data && (
+            {/* Route Info & Calldata expander — hidden while the displayed
+                signal belongs to a pair other than the one on screen (the
+                route summary names the SIGNAL's pair, not the picker's). */}
+            {latestEvent && signalIsCurrent && latestEvent.decision.uniswap_swap_data && (
               <div style={{ marginTop: '10px' }}>
                 <div className="swap-route-info" style={{ fontSize: '0.78rem' }}>
-                  Route: <strong>{latestEvent.decision.uniswap_swap_data.route_summary}</strong>
+                  Route: <strong>{latestEvent.decision.uniswap_swap_data.route_summary.replace(/\s*\((?:UNICHAIN-SEPOLIA|UNICHAIN|ETHEREUM|ARBITRUM|BASE|POLYGON|SEPOLIA)\)/i, '')}</strong>
+                  {/* Client-side execution network (from the pair picker's
+                      tab) rendered NEXT to the server-built route summary —
+                      the picker decision is always visible even if a stale
+                      server binary still labels the summary wrong. */}
+                  {(() => {
+                    const execChainId = pairChainKey ? chainIdForNetworkKey(pairChainKey) : undefined;
+                    return execChainId !== undefined ? (
+                      <span style={{ color: 'var(--text-dim)' }}> · exec on {pickerNetworkLabel(execChainId)}</span>
+                    ) : null;
+                  })()}
                 </div>
 
               </div>

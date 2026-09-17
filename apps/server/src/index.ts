@@ -81,6 +81,22 @@ export let rpcConfig: { configured: boolean; provider: string; url: string; netw
   network: process.env.NETWORK_NAME || 'sepolia'
 };
 
+// Execution network for the monitored pair — server-side source of truth for
+// the swap route label, the calldata network and the live-price pool. The
+// dashboard pair picker pushes it via /api/settings (rpcNetwork), standalone
+// or together with a validated RPC URL. Priority chain: this value → the RPC
+// link's network → NETWORK_NAME (uniswapApi.ts remaps sepolia →
+// unichain-sepolia for v4 routes).
+// READ IT VIA getSelectedNetwork(): the esbuild CJS bundle used by the desktop
+// SEA exe can snapshot a RE-ASSIGNED `let` into importing modules (imported
+// bindings are copied getter snapshots there), so cross-module readers must
+// call the getter to always see the live value. Objects like rpcConfig /
+// routeConfig are mutated in place and don't need this pattern.
+export let selectedNetwork: string = process.env.NETWORK_NAME || 'sepolia';
+export function getSelectedNetwork(): string {
+  return selectedNetwork;
+}
+
 // Route selection state (Uniswap v4 route — see
 // docs/design/uniswap-routing-v3-v4-hooks.md). uniswapApi.ts imports this same
 // object to read the PoolKey params for the calldata encoder. The legacy v3
@@ -160,6 +176,7 @@ app.get('/api/health', (req, res) => {
     emergencyPause,
     maxTradeAmountEth,
     selectedPair,
+    selectedNetwork,
     routeProtocol: routeConfig.protocol,
     rpcConfigured: rpcConfig.configured,
     activeWsClients: clients.size
@@ -286,7 +303,8 @@ app.post('/api/trigger', async (req, res) => {
   const effectiveTrigger = (isPlayground && triggerIsPlayground && trigger.pair !== selectedPair)
     ? { ...trigger, pair: selectedPair }
     : trigger;
-  const networkForPrice = (rpcConfig.configured && rpcConfig.network ? rpcConfig.network : (process.env.NETWORK_NAME || 'sepolia')).toLowerCase();
+  const networkForPrice = (getSelectedNetwork() || (rpcConfig.configured && rpcConfig.network) || process.env.NETWORK_NAME || 'sepolia').toLowerCase();
+  console.log(`🎯 [Network] ${effectiveTrigger.pair} resolves to network '${networkForPrice}' (selectedNetwork=${getSelectedNetwork()}, rpcLink=${rpcConfig.configured ? rpcConfig.network : 'unset'}, env=${process.env.NETWORK_NAME ?? 'unset'})`);
   const live = await getLivePairPrice(effectiveTrigger.pair, networkForPrice, effectiveTrigger.current_price);
   effectiveTrigger.current_price = live.price;
   console.log(`💰 [Live Price] ${effectiveTrigger.pair} = ${live.price.toFixed(6)} (source: ${live.source})`);
@@ -354,6 +372,14 @@ app.post('/api/settings', (req, res) => {
       return res.status(400).json({ success: false, error: 'maxTradeAmount must be a finite number greater than zero.' });
     }
     maxTradeAmountEth = budget;
+  }
+  // Pair execution network (dashboard pair picker). Accepted STANDALONE —
+  // before this guard existed, a network push without an RPC URL was silently
+  // dropped (it only applied inside the rpcUrl block below) and every route
+  // label fell back to NETWORK_NAME (sepolia → UNICHAIN-SEPOLIA).
+  if (typeof rpcNetwork === 'string' && rpcNetwork && rpcNetwork !== selectedNetwork) {
+    selectedNetwork = rpcNetwork;
+    console.log(`🎯 [Network] Pair execution network set to ${rpcNetwork} (via /api/settings${rpcUrl ? ' + rpcUrl' : ', no RPC link'})`);
   }
   // RPC plug-in (keys modal). Only the full URL is kept; it is NOT echoed in
   // WebSocket broadcasts or logs. Passing an empty string clears the config.

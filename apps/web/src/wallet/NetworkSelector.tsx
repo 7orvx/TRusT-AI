@@ -32,8 +32,12 @@ export const CHAIN_LOGOS: Record<number, string> = {
   42161: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/arbitrum/info/logo.png',
   8453: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png',
   137: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/polygon/info/logo.png',
-  // No official Unichain asset exists yet — the badge falls back to the brand
-  // color + letter for 130, 1301 and 11155111.
+  // No official Unichain chain asset exists in the TrustWallet blockchain set
+  // yet (the badge used to fall back to the brand color + letter 'U'). Until
+  // an official asset ships, Unichain — Uniswap's L2 — borrows the official
+  // UNI unicorn logo. Presentation only: never used as a pair/swap identifier.
+  130: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984/logo.png',
+  1301: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984/logo.png',
 };
 
 // Presentation-only badge info for the token picker overlays: brand color,
@@ -49,9 +53,9 @@ export function getNetworkBadgeInfo(chainId: number): { label: string; color: st
     case 137:
       return { label: 'Polygon', color: '#8247e0', symbol: 'P', logo: CHAIN_LOGOS[137] };
     case 130:
-      return { label: 'Unichain', color: '#ff3366', symbol: 'U' };
+      return { label: 'Unichain', color: '#ff3366', symbol: 'U', logo: CHAIN_LOGOS[130] };
     case 1301:
-      return { label: 'Unichain Sepolia', color: '#ff3366', symbol: 'U' };
+      return { label: 'Unichain Sepolia', color: '#ff3366', symbol: 'U', logo: CHAIN_LOGOS[1301] };
     case 11155111:
     default:
       return { label: 'Sepolia', color: '#9d4edd', symbol: 'S' };

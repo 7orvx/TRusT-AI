@@ -1,6 +1,6 @@
 import { encodeFunctionData, encodeAbiParameters, keccak256, parseUnits, createPublicClient, http, decodeFunctionResult } from 'viem';
 import { MarketTrigger } from './aiProvider.js';
-import { rpcConfig, routeConfig } from './index.js';
+import { rpcConfig, routeConfig, getSelectedNetwork } from './index.js';
 
 export interface UniswapSwapData {
   to_address: string;
@@ -280,6 +280,19 @@ const SYMBOL_BY_ADDRESS: Record<string, string> = Object.fromEntries(
   Object.entries(TOKEN_BY_SYMBOL).map(([sym, addr]) => [addr.toLowerCase(), sym])
 );
 
+// True when BOTH tokens are the Unichain Sepolia playground mock tokens.
+// The mock pool's PoolKey (fee 2500 / tick 25) is ONLY valid for this pair —
+// applying it to a real pair (LINK/USDC, WETH/USDC…) built calldata for a
+// pool that does not exist on the target chain. Real pairs route through the
+// standard hookless fee tiers instead.
+export function isMockPairTokens(tokenA: string, tokenB: string): boolean {
+  const a = (tokenA || '').toLowerCase();
+  const b = (tokenB || '').toLowerCase();
+  const mockA = a === '0xd1f4c92fa1436ab2d110a02df56224ed0a4f5860' || a === '0xe05454d256ce63ae75df334ec6e0f1dc3e972e06';
+  const mockB = b === '0xd1f4c92fa1436ab2d110a02df56224ed0a4f5860' || b === '0xe05454d256ce63ae75df334ec6e0f1dc3e972e06';
+  return mockA && mockB;
+}
+
 // Multichain token catalog — VERIFIED per-chain contracts for the L2 v4 routes
 // (source: the official Uniswap Token List, tokens.uniswap.org — mainnet rows
 // match TOKEN_BY_SYMBOL exactly, which is how the source was cross-checked).
@@ -380,7 +393,14 @@ function resolveNetwork(trigger?: MarketTrigger): { net: string; networkLabel: s
     }
   }
 
-  const configuredNetwork = rpcConfig && rpcConfig.configured ? rpcConfig.network : undefined;
+  // Priority: the dashboard-selected pair network (pushed via /api/settings
+  // even without an RPC link) → the RPC link's network → .env NETWORK_NAME.
+  // Before the selectedNetwork push existed this resolved to NETWORK_NAME for
+  // every non-RPC setup, so every route label read UNICHAIN-SEPOLIA regardless
+  // of the pair's chain. The GETTER matters: in the desktop SEA's esbuild CJS
+  // bundle a re-assigned `let` imported from another module can be snapshotted
+  // at load time (always 'sepolia' here) — the getter always reads live state.
+  const configuredNetwork = getSelectedNetwork() || (rpcConfig && rpcConfig.configured ? rpcConfig.network : undefined);
   const resolvedNetwork = configuredNetwork || (process.env.NETWORK_NAME || 'sepolia');
   let net = resolvedNetwork.toLowerCase();
   // Sepolia testnet does not host Uniswap v4 Universal Router; default testnet v4 routes to unichain-sepolia.
@@ -563,6 +583,11 @@ export async function getUniswapSwapData(
   );
 
   const { net, networkLabel } = resolveNetwork(trigger);
+  // PoolKey scoping: the dashboard's Route panel (routeConfig — fee 2500 /
+  // tick 25) describes the user-deployed mUSDC/mUSDT playground pool. Those
+  // params are only valid for THAT pair; a real pair (LINK/USDC…) must never
+  // inherit them or the encoded PoolKey points at a nonexistent pool.
+  const isPlaygroundRoute = isMockPairTokens(tokenIn, tokenOut);
   // Multichain catalog: on Arbitrum/Base/Polygon the trigger's mainnet
   // addresses are translated into the target chain's verified contracts
   // (throws for unmapped tokens — see resolveChainToken). Decimals stay keyed
@@ -583,9 +608,13 @@ export async function getUniswapSwapData(
       );
     }
     const poolManager = V4_POOL_MANAGER_BY_NETWORK[net];
-    const fee = routeConfig.v4Fee > 0 ? routeConfig.v4Fee : 2500;
-    const tickSpacing = routeConfig.v4TickSpacing > 0 ? routeConfig.v4TickSpacing : 60;
-    const hooksRaw = (routeConfig.v4HooksAddress || '').trim();
+    // Playground pair → the user-configured PoolKey (routeConfig); real pairs
+    // → the standard hookless 0.05% tier (fee 500 / tick 60), the most liquid
+    // default v4 pool for major pairs. The min-out is live-quoted either way,
+    // so a pool that does not exist on-chain still fails safely at quote time.
+    const fee = isPlaygroundRoute && routeConfig.v4Fee > 0 ? routeConfig.v4Fee : 500;
+    const tickSpacing = isPlaygroundRoute && routeConfig.v4TickSpacing > 0 ? routeConfig.v4TickSpacing : 60;
+    const hooksRaw = isPlaygroundRoute ? (routeConfig.v4HooksAddress || '').trim() : '';
     const hooksAddress: `0x${string}` = /^0x[0-9a-fA-F]{40}$/.test(hooksRaw)
       ? (hooksRaw.toLowerCase() as `0x${string}`)
       : ('0x0000000000000000000000000000000000000000' as `0x${string}`);

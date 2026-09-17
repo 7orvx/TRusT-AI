@@ -1,4 +1,4 @@
-import { getUniswapSwapData, UniswapSwapData } from './uniswapApi.js';
+import { getUniswapSwapData, UniswapSwapData, isMockPairTokens } from './uniswapApi.js';
 import { routeConfig } from './index.js';
 
 export interface MarketTrigger {
@@ -103,13 +103,18 @@ export async function generateAIDecision(
   // Active swap route context (v4 primary in this project). Build a concise
   // human-readable description for the LLM prompt so the agent can factor
   // route settings and optional hook permissions into sizing and risk.
-  const activeRoute = routeConfig
+  // PoolKey scoping: the Route-panel config (fee 2500 / tick 25) describes the
+  // mUSDC/mUSDT Unichain Sepolia playground pool ONLY — real pairs route
+  // through the standard hookless 0.05% tier (see getUniswapSwapData), so the
+  // prompt must reflect the route that will actually be built.
+  const isMockTrigger = isMockPairTokens(trigger.token_in || '', trigger.token_out || '');
+  const activeRoute = isMockTrigger && routeConfig
     ? `Uniswap ${routeConfig.protocol} (fee ${routeConfig.v4Fee}, tick spacing ${routeConfig.v4TickSpacing}`
       + (routeConfig.v4HooksAddress
         ? `, hook ${routeConfig.v4HooksAddress}${routeConfig.v4HookPermissions ? ` [${routeConfig.v4HookPermissions}]` : ''}`
         : ', no hook')
       + ')'
-    : 'Uniswap v4';
+    : 'Uniswap v4 (standard hookless 0.05% pool, fee 500 / tick spacing 60)';
 
   // Build a compact prompt for downstream LLM providers. Keep it strict but
   // human-readable so fallback mock parsing and heuristic providers behave.

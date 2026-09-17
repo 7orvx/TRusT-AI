@@ -182,7 +182,28 @@ identical**. Fields: `block_number`, `block_hash`, `pair`, `token_in`,
 `v4HookPermissions` (the v4-only route config — the legacy v3 leg was removed,
 2026-09-15); state is
 in-memory only. `maxTradeAmount` must be a finite number > 0 (400 otherwise).
-  RPC fields set the in-memory `rpcConfig` (empty string clears it).
+  RPC fields set the in-memory `rpcConfig` (empty string clears it). Since
+  2026-09-17 `rpcNetwork` is ALSO applied standalone (no `rpcUrl` required)
+  into the in-memory `selectedNetwork` — the source of truth for the swap
+  route label + calldata network (`resolveNetwork` in `uniswapApi.ts`) and the
+  live-price network in `/api/trigger`. Priority: `selectedNetwork` → RPC
+  link's network → `NETWORK_NAME` (sepolia still remaps to unichain-sepolia
+  for v4 routes). Exposed via `/api/health` as `selectedNetwork`. Sharp edge:
+  cross-module readers MUST use `getSelectedNetwork()` (index.ts) — the
+  desktop SEA's esbuild CJS bundle snapshots re-assigned `let` imports at load
+  time (a plain `import { selectedNetwork }` froze on 'sepolia' forever),
+  while in-place-mutated objects (`rpcConfig`, `routeConfig`) are safe. The
+  server logs `🎯 [Network] … set to <key>` on every applied push and
+  `🎯 [Network] <pair> resolves to <net>` per trigger — if those lines are
+  absent, the running binary predates this fix. 2026-09-17: on dashboard
+  load the web client pushes the saved RPC link FIRST and the pair + its
+  network SECOND — the server keeps whichever `rpcNetwork` lands last, and
+  the old order let the link's stale stored network win (every route label
+  read UNICHAIN-SEPOLIA again). Same date: the playground PoolKey (fee 2500 /
+  tick 25 + hook) is applied ONLY to the mUSDC/mUSDT mock pair — real pairs
+  route through the standard hookless fee 500 / tick 60 tier
+  (`isMockPairTokens` in `uniswapApi.ts`), and the LLM prompt describes the
+  route that will actually be built.
 - `GET /api/rpc-config` — returns `{ configured, provider, url, network }` to
   the Rust engine so the UI-set RPC link needs no `.env` edit. Contains the
   keyed URL — do not log/broadcast it, and never expose this server publicly.
@@ -522,6 +543,26 @@ and kills both sidecars on exit. Two runtime contracts matter for desktop builds
     `docs/design/uniswap-routing-v3-v4-hooks.md` §10.2 — completed). All swaps
     encode a Universal Router v4 command with Permit2 approvals. Older clients
     that still POST `routeProtocol: 'v3'` are accepted but ignored.
+20. ✅ **Mock/route config leakage + stale-signal card — fixed (2026-09-17).**
+    Two compounding bugs made a LINK/USDC (or WETH/UNI on Base/Polygon) card
+    render a mUSDT/mUSDC playground route: (a) the playground PoolKey from
+    the Route panel (fee 2500 / tick 25) leaked into EVERY pair's calldata
+    and route label — it is now scoped to the mock pair (`isMockPairTokens`
+    in `uniswapApi.ts`); real pairs route through the standard hookless
+    fee 500 / tick 60 tier; (b) the swap card kept the LAST decision ever
+    received, even after the user changed pair — NEW_DECISION payloads whose
+    `trigger.pair` does not match the selected pair now go feed-only
+    (`signalPairMatchesSelection` in `App.tsx`), and the mock pair is only
+    coherent when explicitly selected. The card's Route line strips the
+    static `(<NETWORK>)` mention from the summary — the picker's
+    `exec on <network>` is the network shown (the summary's label describes
+    where calldata was BUILT, which can trail the UI pick by one signal).
+21. ✅ **Boot network race on dashboard load — fixed (2026-09-17).** The load
+    effect pushed pair+network, then the saved RPC link — whose stale stored
+    network (e.g. `sepolia`) overwrote `selectedNetwork` server-side (last
+    write wins). Fee/tick DID update while the label stayed UNICHAIN-SEPOLIA,
+    which looked like a stale binary. Push order inverted: RPC link first,
+    pair + its network last.
 ---
 
 ## 8. Roadmap context
@@ -655,7 +696,21 @@ working notes (original roadmap, product conversations): `docs/internal/`
   `TOKEN_ADDRESS_BY_CHAIN`), with the dynamic top-100 capped at 10 entries
   per tab on the quote side. Monitor-card and picker prices share ONE source
   (`getUsdPriceMap` over registry + dynamic symbols) — no selector-vs-monitor
-  divergence.
+  divergence. Since 2026-09-17 the picker's network badges follow the active
+  tab (registry tokens show the tab's chain badge — e.g. Base under the Base
+  tab — instead of always Ethereum; on 'ALL' registry tokens keep the mainnet
+  badge), the quick pills are filtered by the tab's coverage and canonicalize
+  ETH→WETH (wrapped symbols match the catalog), and the modal subtitle names
+  the network being browsed. `pickNetworkForPair` canonicalizes ETH→WETH /
+  BTC→WBTC before the coverage lookup so native-alias quotes still resolve the
+  pair's default chain.  The Unichain/Unichain Sepolia chain badge borrows the
+  official UNI unicorn logo (TrustWallet asset) until an official chain asset
+  exists — `CHAIN_LOGOS` in `apps/web/src/wallet/NetworkSelector.tsx`. Since
+  2026-09-17 the pair's network survives a server/desktop restart: the load
+  push sends the pair's network key (`rpcNetwork`) together with the pair, and
+  the server applies it standalone into `selectedNetwork` — signal cards and
+  calldata now reflect the pair's real chain (previously every route label
+  fell back to `NETWORK_NAME` → UNICHAIN-SEPOLIA).
 - ✅ **Pair echo ping-pong + ghost WS reconnect — fixed** (2026-09-16): the
   server broadcasts `SETTINGS_UPDATED` with `pairChanged` (true only when the
   request actually mutated the pair — single-writer) and `changedBy` (the
@@ -686,6 +741,14 @@ working notes (original roadmap, product conversations): `docs/internal/`
   invisible in the desktop app (stale 2026-09-15 build shipped for a whole
   session). The web build invocation uses `cmd.exe /c npm ...` on Windows
   (without `/c` the cmd opens interactively and hangs staging).
+- ✅ **Route/pair coherence + multichain route defaults — done (2026-09-17):**
+  the playground PoolKey (fee 2500/tick 25) is scoped to the mUSDC/mUSDT mock
+  pair; real pairs route through the standard hookless fee 500/tick 60 v4
+  tier (live V4Quoter min-out anchoring included); signals for a pair other
+  than the selected one go feed-only so the swap card never mixes pairs; and
+  the dashboard pushes the saved RPC link BEFORE the pair's network on load
+  so `selectedNetwork` always ends on the pair's chain. The card's Route line
+  drops the static network mention (`exec on <network>` from the picker).
 - 🔜 **Phase 4 — live on-chain feed (first slice landed, 2026-09-15):**
   `apps/server/src/poolPrice.ts` reads the REAL v4 pool price (`getSlot0` on
   the PoolManager, poolId derived from the pair's PoolKey) through the user's
