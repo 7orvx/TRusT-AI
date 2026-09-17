@@ -55,7 +55,7 @@ const CHAIN_TOKEN_COVERAGE: Record<number, Set<string>> = {
   42161: new Set(['WETH', 'WBTC', 'USDC', 'LINK', 'UNI', 'DAI', 'LDO', 'AAVE']), // 8
   8453: new Set(['WETH', 'USDC', 'UNI', 'DAI', 'AAVE']), // 5
   137: new Set(['WETH', 'WBTC', 'USDC', 'USDT', 'LINK', 'UNI', 'DAI', 'AAVE']), // 8
-  130: new Set([]), // catalog has no verified v4 pair set for Unichain mainnet yet
+  130: new Set(['WETH', 'WBTC', 'USDC', 'USDT', 'LINK', 'UNI', 'DAI', 'LDO', 'AAVE']), // 9 — verified via Uniswap Token List (2026-09-16)
   1301: new Set(['mUSDC', 'mUSDT']), // mock playground pool
 };
 

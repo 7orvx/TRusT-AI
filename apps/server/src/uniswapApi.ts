@@ -289,6 +289,17 @@ const SYMBOL_BY_ADDRESS: Record<string, string> = Object.fromEntries(
 // Gaps are DELIBERATE: USDT is not in the official list on Arbitrum/Base and
 // WBTC/LDO are absent on Base/Polygon — unverified addresses are never guessed.
 const TOKEN_ADDRESS_BY_CHAIN: Record<number, Record<string, `0x${string}`>> = {
+  130: { // Unichain mainnet (source: Uniswap Token List — verified 2026-09-16)
+    WETH: '0x4200000000000000000000000000000000000006',
+    WBTC: '0x927B51f251480a681271180DA4de28D44EC4AfB8',
+    USDC: '0x078D782b760474a361dDA0AF3839290b0EF57AD6',
+    USDT: '0x588CE4F028D8e7B53B687865d6A67b3A54C75518',
+    LINK: '0x5a53B6D19D8EDCb7923F0D840EeBB3f09BBeEfB7',
+    UNI: '0x8f187aA05619a017077f5308904739877ce9eA21',
+    DAI: '0x20CAb320A855b39F724131C69424240519573f81',
+    LDO: '0x68A6dbc7214a0F2b0d875963663F1613814E8829',
+    AAVE: '0x02a24C380dA560E4032Dc6671d8164cfbEEAAE1e',
+  },
   42161: { // Arbitrum One
     WETH: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
     WBTC: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f',
@@ -325,7 +336,7 @@ const TOKEN_ADDRESS_BY_CHAIN: Record<number, Record<string, `0x${string}`>> = {
  * mainnet addresses into calldata that would revert on-chain (wasted gas).
  */
 function resolveChainToken(chainId: number | undefined, address: string): `0x${string}` {
-  if (chainId !== 42161 && chainId !== 8453 && chainId !== 137) {
+  if (chainId !== 42161 && chainId !== 8453 && chainId !== 137 && chainId !== 130) {
     return address.toLowerCase() as `0x${string}`;
   }
   const sym = SYMBOL_BY_ADDRESS[address.toLowerCase()];

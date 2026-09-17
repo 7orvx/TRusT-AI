@@ -135,6 +135,9 @@ const V4_POOL_MANAGER_BY_CHAIN: Record<number, string> = {
   1301: '0x00b036b58a818b1bc34d502d3fe730db729e62ac', // Unichain Sepolia
   130: '0x1f98400000000000000000000000000000000004',  // Unichain
   1: '0x000000000004444c5dc75cB358380D2e3dE08A90',    // Ethereum
+  42161: '0x360e68faccca8ca495c1b759fd9eee466db9fb32', // Arbitrum One
+  8453: '0x498581ff718922c3f8e6a244956af099b2652b2b',  // Base
+  137: '0x67366782805870060151383f4bbff9dab53e5cd6',   // Polygon PoS
 };
 
 // Hook lifecycle flag names (first 8 words of the HookPermissions struct, in
