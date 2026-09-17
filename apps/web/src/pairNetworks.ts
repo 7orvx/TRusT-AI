@@ -74,6 +74,18 @@ export function pairSupportedOnChain(base: string, quote: string, chainId: numbe
   return coverage.has(base) && coverage.has(quote);
 }
 
+/**
+ * True when a SINGLE token has a verified contract on the chain. This is what
+ * the picker's network filter uses for catalog tokens — a registry token's
+ * ADDRESS lives on mainnet, but the same SYMBOL has verified per-chain
+ * contracts (TOKEN_ADDRESS_BY_CHAIN), so it must appear under the Arbitrum/
+ * Base/Polygon/Unichain tabs too. Without this, only the Ethereum tab ever
+ * lists catalog tokens (the empty-tabs bug).
+ */
+export function tokenSupportedOnChain(symbol: string, chainId: number): boolean {
+  return CHAIN_TOKEN_COVERAGE[chainId]?.has(symbol) ?? false;
+}
+
 /** Chains (from PICKER_NETWORKS) where the pair can execute — picker hinting. */
 export function supportedChainsForPair(base: string, quote: string): number[] {
   return PICKER_NETWORKS.filter((n) => pairSupportedOnChain(base, quote, n.chainId)).map((n) => n.chainId);

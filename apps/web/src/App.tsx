@@ -43,7 +43,7 @@ import {
   type EIP1193,
 } from './wallet/config';
 import { getNetworkBadgeInfo, CHAIN_NAMES as WAGMI_CHAIN_NAMES } from './wallet/NetworkSelector';
-import { PICKER_NETWORKS, networkKeyForChainId, chainIdForNetworkKey, pairSupportedOnChain, isMockPair, MOCK_PAIR_CHAIN_ID, pickNetworkForPair, pickerNetworkLabel, PAIR_STORAGE_KEY, PAIR_INSTANCE_KEY, MAX_DYNAMIC_TOKENS_PER_TAB } from './pairNetworks';
+import { PICKER_NETWORKS, networkKeyForChainId, chainIdForNetworkKey, pairSupportedOnChain, tokenSupportedOnChain, isMockPair, MOCK_PAIR_CHAIN_ID, pickNetworkForPair, pickerNetworkLabel, PAIR_STORAGE_KEY, PAIR_INSTANCE_KEY, MAX_DYNAMIC_TOKENS_PER_TAB } from './pairNetworks';
 import {
   getTokenPrice,
   getUsdPrice,
@@ -2362,11 +2362,16 @@ function AppContent() {
                 })
                 .filter((t) => {
                   if (selectedNetworkFilter === 'ALL') return true;
-                  // Honest filtering: a token matches a chain chip when it is
-                  // actually deployed there (chains from the CoinGecko platform
-                  // map). Registry tokens are mainnet; m-tokens Unichain Sepolia;
-                  // tokens with no known chains only show under "All Networks".
-                  const tokenChains = t.chains ?? (t.chainId !== undefined ? [t.chainId] : (() => { const c = knownChainOf(t.symbol); return c !== undefined ? [c] : []; })());
+                  // Catalog tokens (registry + mocks) match via the per-chain
+                  // coverage mirror — the SAME SYMBOL has a verified contract
+                  // on Arbitrum/Base/Polygon/Unichain even though its mainnet
+                  // ADDRESS is what the registry stores. Known-chain logic
+                  // (mainnet for registry) would otherwise pin every catalog
+                  // token to the Ethereum tab and leave the other tabs EMPTY.
+                  if (tokenBySymbol(t.symbol)) return tokenSupportedOnChain(t.symbol, selectedNetworkFilter);
+                  // Dynamic top-100 tokens match via the CoinGecko platform
+                  // map (real chains where the token is deployed).
+                  const tokenChains = t.chains ?? (t.chainId !== undefined ? [t.chainId] : []);
                   return tokenChains.includes(selectedNetworkFilter);
                 })
                 .filter(
