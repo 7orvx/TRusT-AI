@@ -171,7 +171,11 @@ identical**. Fields: `block_number`, `block_hash`, `pair`, `token_in`,
 - `POST /api/trigger` — engine push. Pipeline: emergency pause → pair filter
   (`selectedPair`) → AI throttle (`analysisIntervalMs`, default 15 s) →
   **live price resolution** (`getLivePairPrice` in `poolPrice.ts`: v4 pool
-  `slot0` via the user's RPC → CoinGecko ratio → synthetic, stamped as
+  `slot0` via the user's RPC — read through the **StateView lens**
+  (`V4_STATE_VIEW_BY_NETWORK`; the PoolManager itself REVERTS direct
+  `getSlot0(bytes32)` calls on several chains, e.g. Unichain Sepolia, and
+  viem decodes multi-output calls positionally, so named-output reads
+  silently fail) → CoinGecko ratio → synthetic, stamped as
   `price_source`; `trigger.current_price` is overwritten with the live value
   so the prompt, monitor card and feed share one number) →
   `generateAIDecision(trigger, provider, key, maxTradeAmountEth)` → WS
@@ -346,7 +350,13 @@ and kills both sidecars on exit. Two runtime contracts matter for desktop builds
   must contain the same symbols + mainnet addresses. Adding a token to the
   dashboard picker without adding it to the engine/server maps breaks either
   the pair resolution or the swap calldata decimals (`Unknown token decimals`
-  error). Since 2026-09-11 the web picker also lists a **dynamic top-100
+  error). **Per-chain resolution:** on Unichain Sepolia (1301) WETH/USDC map
+  to the REAL testnet contracts (`TOKEN_ADDRESS_BY_CHAIN[1301]` in
+  `uniswapApi.ts`, mirrored by `TESTNET_ADDRESS_BY_NETWORK` in `poolPrice.ts`;
+  WETH = OP-Stack canonical `0x4200…0006`, USDC = official testnet faucet
+  `0x31d0…768f` — no dollar peg). The engine keeps emitting mainnet
+  addresses; the server translates. The web picker offers WETH/USDC under
+  the Unichain Sepolia tab backed by the PUBLIC real-asset pool. Since 2026-09-11 the web picker also lists a **dynamic top-100
   CoinGecko universe** (`fetchTopTokens` in `priceFetcher.ts`) — those entries
   are price-only (quote side / view-only pairs); only `TOKEN_REGISTRY` tokens
   are offered as swap BASE, so the registry mirrors above still gate real
@@ -563,6 +573,32 @@ and kills both sidecars on exit. Two runtime contracts matter for desktop builds
     write wins). Fee/tick DID update while the label stayed UNICHAIN-SEPOLIA,
     which looked like a stale binary. Push order inverted: RPC link first,
     pair + its network last.
+22. ✅ **Slot0 reader silently dead — fixed (2026-09-17).** Two compounding
+    bugs starved the live pool price: (a) the PoolManager on Unichain Sepolia
+    reverts direct `getSlot0(bytes32)` calls — the supported read path is the
+    v4 StateView lens (`0xc199f1072a74d4e905aba1a84d9a45e2546b6222` on 1301;
+    per-chain table `V4_STATE_VIEW_BY_NETWORK` in `poolPrice.ts`, addresses
+    from the official deployments doc), now primary with a PoolManager
+    fallback; (b) viem's `decodeFunctionResult` returns multi-output tuples
+    POSITIONALLY — the old named-output read was always `undefined`, failing
+    the `> 0` check and degrading EVERY pool read (even the mock pair) to
+    CoinGecko/synthetic. Also fixed: the slot0→price conversion ignored
+    decimals (raw WETH/USDC ratio was off by 1e12).
+23. ✅ **Public real-asset test pools — done (2026-09-17).** Anyone with
+    faucet ETH can run a REAL end-to-end swap without deploying mock
+    contracts: the hookless WETH/USDC pool on Unichain Sepolia (fee 500 /
+    tick 10, poolId `0x71fba4ef…41422`) was chain-discovered (PoolManager
+    Initialize events → StateView liquidity → live V4Quoter quote > 0) and
+    is cataloged in `PUBLIC_POOL_KEY_BY_NETWORK` (`uniswapApi.ts`). Routed
+    by PAIR+NETWORK — never by the Route-panel config — and takes PoolKey
+    precedence between the mock playground and the generic 0.05% tier. The
+    testnet USDC is a faucet token with NO dollar peg: monitor/route show
+    the real pool price as-is. The mUSDC/mUSDT playground stays intact.
+    Discovery/verification tooling lives in `apps/server/scripts/`
+    (discover-v4-pools / identify-v4-pools / check-public-pool /
+    verify-public-route) and can be re-run on any chain by swapping the RPC
+    + PoolManager constants — including Sepolia Ethereum, should the
+    Unichain pool ever be too thin for a test trade.
 ---
 
 ## 8. Roadmap context
@@ -749,6 +785,13 @@ working notes (original roadmap, product conversations): `docs/internal/`
   the dashboard pushes the saved RPC link BEFORE the pair's network on load
   so `selectedNetwork` always ends on the pair's chain. The card's Route line
   drops the static network mention (`exec on <network>` from the picker).
+- ✅ **Public real-asset test pool + StateView price feed — done (2026-09-17):**
+  WETH/USDC on Unichain Sepolia is executable against the PUBLIC hookless v4
+  pool (fee 500 / tick 10, poolId `0x71fba4ef…41422` — chain-verified with a
+  live V4Quoter quote), WETH/USDC maps to real testnet contracts, and the
+  live slot0 reader works again (StateView lens + positional decode +
+  decimal-aware conversion — see §7 #22). The mUSDC/mUSDT playground remains
+  first-class. Reusable on-chain discovery scripts in `apps/server/scripts/`.
 - 🔜 **Phase 4 — live on-chain feed (first slice landed, 2026-09-15):**
   `apps/server/src/poolPrice.ts` reads the REAL v4 pool price (`getSlot0` on
   the PoolManager, poolId derived from the pair's PoolKey) through the user's

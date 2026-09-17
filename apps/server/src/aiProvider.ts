@@ -1,5 +1,5 @@
-import { getUniswapSwapData, UniswapSwapData, isMockPairTokens } from './uniswapApi.js';
-import { routeConfig } from './index.js';
+import { getUniswapSwapData, UniswapSwapData, isMockPairTokens, getPublicPoolKey } from './uniswapApi.js';
+import { routeConfig, rpcConfig, getSelectedNetwork } from './index.js';
 
 export interface MarketTrigger {
   block_number: number;
@@ -108,12 +108,21 @@ export async function generateAIDecision(
   // through the standard hookless 0.05% tier (see getUniswapSwapData), so the
   // prompt must reflect the route that will actually be built.
   const isMockTrigger = isMockPairTokens(trigger.token_in || '', trigger.token_out || '');
+  // Mirror resolveNetwork()'s priority (selectedNetwork → RPC link → env) and
+  // the sepolia → unichain-sepolia v4 remap so the prompt names the pool the
+  // encoder will actually target.
+  const netForRoute = (getSelectedNetwork() || (rpcConfig && rpcConfig.configured ? rpcConfig.network : undefined) || process.env.NETWORK_NAME || 'sepolia').toLowerCase();
+  const routeNet = netForRoute === 'sepolia' ? 'unichain-sepolia' : netForRoute;
+  const [routeBaseSym, routeQuoteSym] = (trigger.pair || '/').split('/');
+  const publicPool = getPublicPoolKey(routeNet, routeBaseSym ?? '', routeQuoteSym ?? '');
   const activeRoute = isMockTrigger && routeConfig
     ? `Uniswap ${routeConfig.protocol} (fee ${routeConfig.v4Fee}, tick spacing ${routeConfig.v4TickSpacing}`
       + (routeConfig.v4HooksAddress
         ? `, hook ${routeConfig.v4HooksAddress}${routeConfig.v4HookPermissions ? ` [${routeConfig.v4HookPermissions}]` : ''}`
         : ', no hook')
       + ')'
+    : publicPool
+    ? `Uniswap v4 (public ${routeNet} pool: fee ${publicPool.fee}, tick spacing ${publicPool.tickSpacing}, no hook)`
     : 'Uniswap v4 (standard hookless 0.05% pool, fee 500 / tick spacing 60)';
 
   // Build a compact prompt for downstream LLM providers. Keep it strict but

@@ -251,6 +251,10 @@ const TOKEN_DECIMALS: Record<string, number> = {
   // Unichain Sepolia mock tokens (Phase A playground)
   '0xe05454d256ce63ae75df334ec6e0f1dc3e972e06': 6,  // mUSDT (mock USDT on Unichain Sepolia)
   '0xd1f4c92fa1436ab2d110a02df56224ed0a4f5860': 6,  // mUSDC (mock USDC on Unichain Sepolia)
+  // Unichain Sepolia testnet contracts for the PUBLIC real-asset pool
+  // (chain-verified 2026-09-17 via PoolManager event discovery)
+  '0x4200000000000000000000000000000000000006': 18, // WETH (OP-Stack canonical WETH9)
+  '0x31d0220469e10c4e71834a79b1f276d740d3768f': 6,  // USDC (official testnet USDC, faucet)
 };
 
 // Human-readable symbol → address map for log/routing lookups when the caller
@@ -275,7 +279,8 @@ const TOKEN_BY_SYMBOL: Record<string, `0x${string}`> = {
 
 // Reverse lookup: catalog address (lowercased) → symbol. Used by the
 // multichain resolver below to translate the mainnet-addressed trigger tokens
-// into the target chain's contracts.
+// into the target chain's contracts. Keys are LOWERCASED — callers pass
+// normalized (lowercase) addresses.
 const SYMBOL_BY_ADDRESS: Record<string, string> = Object.fromEntries(
   Object.entries(TOKEN_BY_SYMBOL).map(([sym, addr]) => [addr.toLowerCase(), sym])
 );
@@ -296,12 +301,18 @@ export function isMockPairTokens(tokenA: string, tokenB: string): boolean {
 // Multichain token catalog — VERIFIED per-chain contracts for the L2 v4 routes
 // (source: the official Uniswap Token List, tokens.uniswap.org — mainnet rows
 // match TOKEN_BY_SYMBOL exactly, which is how the source was cross-checked).
-// Chains not listed here (ethereum/unichain/unichain-sepolia) keep the
+// Chains not listed here (ethereum/unichain) keep the
 // mainnet-addressed trigger behavior — the engine catalog is mainnet-based and
 // the Unichain Sepolia playground resolves its own mock tokens.
 // Gaps are DELIBERATE: USDT is not in the official list on Arbitrum/Base and
 // WBTC/LDO are absent on Base/Polygon — unverified addresses are never guessed.
+// 1301 entries are chain-verified on-testnet (NOT from the token list):
+// WETH = OP-Stack canonical WETH9, USDC = the official testnet USDC (faucet).
 const TOKEN_ADDRESS_BY_CHAIN: Record<number, Record<string, `0x${string}`>> = {
+  1301: { // Unichain Sepolia (chain-verified 2026-09-17)
+    WETH: '0x4200000000000000000000000000000000000006',
+    USDC: '0x31d0220469e10c4E71834a79b1f276d740d3768F',
+  },
   130: { // Unichain mainnet (source: Uniswap Token List — verified 2026-09-16)
     WETH: '0x4200000000000000000000000000000000000006',
     WBTC: '0x927B51f251480a681271180DA4de28D44EC4AfB8',
@@ -349,7 +360,7 @@ const TOKEN_ADDRESS_BY_CHAIN: Record<number, Record<string, `0x${string}`>> = {
  * mainnet addresses into calldata that would revert on-chain (wasted gas).
  */
 function resolveChainToken(chainId: number | undefined, address: string): `0x${string}` {
-  if (chainId !== 42161 && chainId !== 8453 && chainId !== 137 && chainId !== 130) {
+  if (chainId !== 42161 && chainId !== 8453 && chainId !== 137 && chainId !== 130 && chainId !== 1301) {
     return address.toLowerCase() as `0x${string}`;
   }
   const sym = SYMBOL_BY_ADDRESS[address.toLowerCase()];
@@ -379,6 +390,32 @@ function getTokenDecimals(address: string): number {
 // orchestrator's REST state uses: the UI-set RPC network via /api/rpc-config,
 // then NETWORK_NAME, then the built-in default. Resolved per request so a late/updated .env is never cached
 // at module load time (desktop sidecar cold starts, dev dotenv flooding later).
+// Public REAL-asset v4 pools for end-to-end testing without user-deployed
+// mock contracts. Discovered on-chain (2026-09-17): PoolManager Initialize
+// events → hookless WETH/USDC pool → StateView liquidity > 0 → live V4Quoter
+// quote > 0 (see apps/server/scripts/check-public-pool.mjs). The testnet USDC
+// is a faucet token with NO dollar peg — the monitor shows the real pool
+// price, whatever it is.
+interface PublicPoolKey { baseSymbol: string; quoteSymbol: string; fee: number; tickSpacing: number }
+const PUBLIC_POOL_KEY_BY_NETWORK: Record<string, PublicPoolKey | undefined> = {
+  'unichain-sepolia': { baseSymbol: 'WETH', quoteSymbol: 'USDC', fee: 500, tickSpacing: 10 },
+};
+
+// Returns the public pool key when the monitored pair IS the network's public
+// real-asset pair (ETH canonicalized to WETH). Undefined otherwise.
+export function getPublicPoolKey(net: string, baseSymbol: string, quoteSymbol: string): PublicPoolKey | undefined {
+  const entry = PUBLIC_POOL_KEY_BY_NETWORK[net];
+  if (!entry) return undefined;
+  const norm = (s: string) => (s === 'ETH' ? 'WETH' : (s || '').toUpperCase());
+  return norm(baseSymbol) === entry.baseSymbol && norm(quoteSymbol) === entry.quoteSymbol ? entry : undefined;
+}
+
+// Catalog symbol for a (mainnet-addressed) token — '' when unknown. Exported
+// for route-policy helpers and tests; the swap encoder uses it internally.
+export function symbolForAddress(address: string): string {
+  return SYMBOL_BY_ADDRESS[(address || '').toLowerCase()] ?? '';
+}
+
 function resolveNetwork(trigger?: MarketTrigger): { net: string; networkLabel: string } {
   // If the trigger is for the Unichain Sepolia mock playground tokens (mUSDC/mUSDT),
   // force network to 'unichain-sepolia' so calldata is generated for Unichain Sepolia.
@@ -588,6 +625,17 @@ export async function getUniswapSwapData(
   // params are only valid for THAT pair; a real pair (LINK/USDC…) must never
   // inherit them or the encoded PoolKey points at a nonexistent pool.
   const isPlaygroundRoute = isMockPairTokens(tokenIn, tokenOut);
+  // Public real-asset pool (e.g. WETH/USDC on Unichain Sepolia): a verified
+  // hookless pool every user can test against — routed by pair+network,
+  // never by the Route-panel config. NOTE: pass the PAIR's base/quote order
+  // (trigger.token_in = base, token_out = quote), NOT the swap-leg order —
+  // on BUY the swap legs are inverted (quote in, base out) and would never
+  // match the pool table.
+  const publicPool = getPublicPoolKey(
+    net,
+    SYMBOL_BY_ADDRESS[baseToken.toLowerCase()] ?? '',
+    SYMBOL_BY_ADDRESS[quoteToken.toLowerCase()] ?? ''
+  );
   // Multichain catalog: on Arbitrum/Base/Polygon the trigger's mainnet
   // addresses are translated into the target chain's verified contracts
   // (throws for unmapped tokens — see resolveChainToken). Decimals stay keyed
@@ -608,12 +656,15 @@ export async function getUniswapSwapData(
       );
     }
     const poolManager = V4_POOL_MANAGER_BY_NETWORK[net];
-    // Playground pair → the user-configured PoolKey (routeConfig); real pairs
-    // → the standard hookless 0.05% tier (fee 500 / tick 60), the most liquid
-    // default v4 pool for major pairs. The min-out is live-quoted either way,
-    // so a pool that does not exist on-chain still fails safely at quote time.
-    const fee = isPlaygroundRoute && routeConfig.v4Fee > 0 ? routeConfig.v4Fee : 500;
-    const tickSpacing = isPlaygroundRoute && routeConfig.v4TickSpacing > 0 ? routeConfig.v4TickSpacing : 60;
+    // PoolKey precedence: playground (mock) config → public real-asset pool →
+    // standard hookless 0.05% tier. The min-out is live-quoted either way, so
+    // a pool that does not exist on-chain still fails safely at quote time.
+    const fee = isPlaygroundRoute && routeConfig.v4Fee > 0
+      ? routeConfig.v4Fee
+      : publicPool ? publicPool.fee : 500;
+    const tickSpacing = isPlaygroundRoute && routeConfig.v4TickSpacing > 0
+      ? routeConfig.v4TickSpacing
+      : publicPool ? publicPool.tickSpacing : 60;
     const hooksRaw = isPlaygroundRoute ? (routeConfig.v4HooksAddress || '').trim() : '';
     const hooksAddress: `0x${string}` = /^0x[0-9a-fA-F]{40}$/.test(hooksRaw)
       ? (hooksRaw.toLowerCase() as `0x${string}`)

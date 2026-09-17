@@ -27,6 +27,20 @@ const V4_POOL_MANAGER_BY_NETWORK: Record<string, `0x${string}`> = {
   polygon: '0x67366782805870060151383f4bbff9dab53e5cd6',
 };
 
+// v4 StateView lens per network (official deployments table — keep in sync).
+// PRIMARY slot0 reader: on several chains (e.g. Unichain Sepolia) the
+// PoolManager itself REVERTS on direct getSlot0(bytes32) calls — the StateView
+// lens is the supported read path. Falls back to a direct PoolManager call
+// where no lens address is cataloged.
+const V4_STATE_VIEW_BY_NETWORK: Record<string, `0x${string}`> = {
+  'unichain-sepolia': '0xc199f1072a74d4e905aba1a84d9a45e2546b6222',
+  unichain: '0x86e8631a016f9068c3f085faf484ee3f5fdee8f2',
+  ethereum: '0x7ffe42c4a5deea5b0fec41c94c136cf115597227',
+  arbitrum: '0x76fd297e2d437cd7f76d50f01afe6160f86e9990',
+  base: '0xa3c0c9b65bad0b08107aa264b0f3db444b867a71',
+  polygon: '0x5ea1bd7974c8a611cbab0bdcafcb1d9cc9b3ba5a',
+};
+
 // Expected chain id per network key — guards the RPC candidate against a
 // wrong/mismatched link (same policy as the quoter in uniswapApi.ts).
 const CHAIN_ID_BY_NETWORK: Record<string, number> = {
@@ -63,13 +77,30 @@ const TOKENS: Record<string, { address: string; decimals: number }> = {
   mUSDT: { address: '0xe05454d256ce63ae75df334ec6e0f1dc3e972e06', decimals: 6 },
   mUSDC: { address: '0xd1f4c92fa1436ab2d110a02df56224ed0a4f5860', decimals: 6 },
 };
+// NOTE: WETH/USDC entries above keep their MAINNET addresses (CoinGecko ratio
+// fallback uses symbols only). On testnet chains, TESTNET_ADDRESS_BY_NETWORK
+// below resolves the real per-chain contracts for the pool read.
+
+// Per-network override for tokens whose TESTNET contract differs from the
+// mainnet address above (the engine catalog is mainnet-addressed). Unichain
+// Sepolia: WETH = OP-Stack canonical WETH9, USDC = official testnet USDC.
+const TESTNET_ADDRESS_BY_NETWORK: Record<string, Record<string, string>> = {
+  'unichain-sepolia': {
+    WETH: '0x4200000000000000000000000000000000000006',
+    USDC: '0x31d0220469e10c4E71834a79b1f276d740d3768F',
+  },
+};
 
 // PoolKey params per known playground pair (the engine + routeConfig defaults;
 // the user's deployed mUSDC/mUSDT v4 pool on Unichain Sepolia). A pair not
 // listed here has no known v4 pool → the reader falls back before even trying.
+// 'WETH/USDC' on Unichain Sepolia is the PUBLIC real-asset pool (hookless
+// fee 500 / tick 10, poolId 0x71fba4ef…41422, liquidity > 0, live-quoted via
+// V4Quoter on 2026-09-17) — anyone can test a real swap against it.
 const POOL_KEYS: Record<string, { fee: number; tickSpacing: number } | undefined> = {
   'mUSDC/mUSDT': { fee: 2500, tickSpacing: 25 },
   'mUSDT/mUSDC': { fee: 2500, tickSpacing: 25 },
+  'WETH/USDC': { fee: 500, tickSpacing: 10 },
 };
 
 export type PriceSource = 'pool' | 'coingecko' | 'synthetic';
@@ -141,9 +172,17 @@ async function readPoolSlot0(pairId: string, net: string): Promise<Slot0Result |
   const poolKey = POOL_KEYS[pairId];
   if (!poolManager || expectedChainId === undefined || !poolKey) return null;
 
-  const base = TOKENS[pairId.split('/')[0]];
-  const quote = TOKENS[pairId.split('/')[1]];
-  if (!base || !quote) return null;
+  const baseEntry = TOKENS[pairId.split('/')[0]];
+  const quoteEntry = TOKENS[pairId.split('/')[1]];
+  if (!baseEntry || !quoteEntry) return null;
+
+  // Testnet chains resolve the REAL per-chain contracts (the catalog entries
+  // above are mainnet-addressed).
+  const netOverride = TESTNET_ADDRESS_BY_NETWORK[net];
+  const resolve = (sym: string, entry: { address: string }) =>
+    netOverride?.[sym]?.toLowerCase() ?? entry.address.toLowerCase();
+  const base = { ...baseEntry, address: resolve(pairId.split('/')[0], baseEntry) };
+  const quote = { ...quoteEntry, address: resolve(pairId.split('/')[1], quoteEntry) };
 
   // v4 PoolKey: currencies sorted numerically (hex-string order works for
   // equal-length addresses), fee, tickSpacing, hooks (none on the playground).
@@ -181,16 +220,37 @@ async function readPoolSlot0(pairId: string, net: string): Promise<Slot0Result |
       const client = createPublicClient({ transport: http(rpcUrl, { timeout: 6000 }) });
       const chainId = await client.getChainId();
       if (chainId !== expectedChainId) continue; // wrong-chain link, next candidate
-      const res = await client.call({ to: poolManager, data: callData });
-      if (!res.data || res.data === '0x') continue;
-      const decoded = decodeFunctionResult({
-        abi: SLOT0_ABI,
-        functionName: 'getSlot0',
-        data: res.data
-      }) as unknown as Slot0Result & Record<string, unknown>;
-      if (decoded.sqrtPriceX96 > 0n) return { sqrtPriceX96: decoded.sqrtPriceX96 };
-    } catch {
-      // candidate failed — try the next one
+      // Primary: StateView lens; fallback: direct PoolManager call (older
+      // chains where the lens may be missing).
+      const stateView = V4_STATE_VIEW_BY_NETWORK[net];
+      const targets: `0x${string}`[] = stateView ? [stateView, poolManager] : [poolManager];
+      for (const target of targets) {
+        try {
+          const res = await client.call({ to: target, data: callData });
+          if (!res.data || res.data === '0x') continue;
+          // viem decodes multi-output tuples POSITIONALLY (an array) even with
+          // named outputs — access by index, not by property name (a named
+          // read on the array is undefined and silently falsified the >0
+          // check, degrading every pool read to the CoinGecko fallback).
+          const decoded = decodeFunctionResult({
+            abi: SLOT0_ABI,
+            functionName: 'getSlot0',
+            data: res.data
+          }) as unknown;
+          const sqrtRaw = Array.isArray(decoded)
+            ? (decoded[0] as bigint | undefined)
+            : (decoded as Slot0Result)?.sqrtPriceX96;
+          if (typeof sqrtRaw === 'bigint' && sqrtRaw > 0n) {
+            return { sqrtPriceX96: sqrtRaw };
+          }
+        } catch {
+          // Expected on chains where the direct PoolManager call reverts
+          // (e.g. Unichain Sepolia) — the StateView attempt above is the
+          // supported path; silent fallthrough keeps per-trigger logs clean.
+        }
+      }
+    } catch (e) {
+      console.warn(`🔍 [Slot0] rpc ${rpcUrl} failed: ${(e as Error).message?.slice(0, 100)}`);
     }
   }
   return null;
@@ -199,12 +259,24 @@ async function readPoolSlot0(pairId: string, net: string): Promise<Slot0Result |
 // Converts slot0.sqrtPriceX96 into a human price of token1 per token0:
 //   price_t1_per_t0 = (sqrtPriceX96 / 2^96)^2
 // The pair price is quote-per-base, so depending on the sort order we take the
-// value or its reciprocal.
-function priceFromSlot0(sqrtPriceX96: bigint, base: { address: string }, quote: { address: string }): number {
+// value or its reciprocal. Slot0's raw ratio is in RAW token units — the
+// decimal difference (e.g. WETH 18 vs USDC 6) must be normalized or every
+// price is off by 10^(dec0 − dec1).
+function priceFromSlot0(
+  sqrtPriceX96: bigint,
+  base: { address: string; decimals: number },
+  quote: { address: string; decimals: number }
+): number {
   const q = Number(sqrtPriceX96) / Number(1n << 96n);
-  const priceToken1PerToken0 = q * q;
+  const priceToken1PerToken0Raw = q * q;
   const baseIsToken0 = base.address.toLowerCase() < quote.address.toLowerCase();
-  return baseIsToken0 ? priceToken1PerToken0 : 1 / priceToken1PerToken0;
+  // Raw → human adjustment is 10^(dec_base − dec_quote) in BOTH branches:
+  // e.g. WETH(18)/USDC(6) with USDC as currency0 → reciprocal branch, and the
+  // human "USDC per WETH" = raw-ratio × 10^(18−6) = ×1e12.
+  const decimalAdj = 10 ** (base.decimals - quote.decimals);
+  return baseIsToken0
+    ? priceToken1PerToken0Raw * decimalAdj
+    : (1 / priceToken1PerToken0Raw) * decimalAdj;
 }
 
 // In-memory short cache so the trigger loop (every ~2.5 s) doesn't hammer the

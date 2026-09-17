@@ -10,7 +10,12 @@
 // SYNC NOTE: CHAIN_TOKEN_COVERAGE mirrors the server's TOKEN_ADDRESS_BY_CHAIN
 // (apps/server/src/uniswapApi.ts). When a token is added to that server map,
 // add it here too so the pair builder only offers executable combinations.
-// Chain 1301 coverage is the Unichain Sepolia mock playground (mUSDC/mUSDT).
+// Chain 1301 coverage: the mock playground pair (mUSDC/mUSDT) PLUS the PUBLIC
+// real-asset test pool WETH/USDC (hookless fee 500 / tick 10, poolId
+// 0x71fba4ef…41422 — chain-verified 2026-09-17). The testnet USDC is the
+// official faucet token (no dollar peg), but the pool is real and swap-able,
+// so anyone with faucet ETH can run an end-to-end swap without deploying
+// contracts.
 
 export interface PickerNetwork {
   chainId: number;
@@ -56,7 +61,7 @@ const CHAIN_TOKEN_COVERAGE: Record<number, Set<string>> = {
   8453: new Set(['WETH', 'USDC', 'UNI', 'DAI', 'AAVE']), // 5
   137: new Set(['WETH', 'WBTC', 'USDC', 'USDT', 'LINK', 'UNI', 'DAI', 'AAVE']), // 8
   130: new Set(['WETH', 'WBTC', 'USDC', 'USDT', 'LINK', 'UNI', 'DAI', 'LDO', 'AAVE']), // 9 — verified via Uniswap Token List (2026-09-16)
-  1301: new Set(['mUSDC', 'mUSDT']), // mock playground pool
+  1301: new Set(['mUSDC', 'mUSDT', 'WETH', 'USDC']), // mock playground + public real-asset WETH/USDC pool
 };
 
 /** Cap for dynamic (price-only, non-registry) tokens shown per network tab —
@@ -113,6 +118,11 @@ export const isMockPair = (base: string, quote: string): boolean => isMockSymbol
 export function pickNetworkForPair(base: string, quote: string): string | undefined {
   if (isMockPair(base, quote)) return 'unichain-sepolia';
   const canonicalBase = base === 'ETH' ? 'WETH' : base === 'BTC' ? 'WBTC' : base;
+  // WETH/USDC defaults to the Unichain Sepolia PUBLIC real-asset pool (the
+  // app's default pair becomes instantly testable end-to-end with faucet
+  // ETH). Explicitly picking the pair under another tab still wins — this is
+  // only the no-tab fallback.
+  if ((canonicalBase === 'WETH' && quote === 'USDC') || (base === 'USDC' && quote === 'WETH')) return 'unichain-sepolia';
   if (base === 'ETH' || base === 'BTC' || base === 'WETH' || base === 'WBTC') return 'ethereum';
   const candidates = [137, 8453, 42161, 1]; // L2-first preference
   for (const chainId of candidates) {

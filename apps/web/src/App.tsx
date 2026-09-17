@@ -332,6 +332,15 @@ const tokenBySymbol = (symbol: string) =>
 // false "Ethereum" attribution) instead of guessing mainnet for everything.
 function knownChainOf(symbol: string): number | undefined {
   if (symbol === 'mUSDC' || symbol === 'mUSDT') return 1301;
+  // WETH/USDC under the Unichain Sepolia tab = the PUBLIC real-asset test
+  // pool (the registry's mainnet-addressed WETH/USDC still resolve to 1 for
+  // the other tabs; the tab-picked execution chain wins at push time).
+  if ((symbol === 'WETH' || symbol === 'USDC') && typeof window !== 'undefined') {
+    try {
+      const stored = parseInt(localStorage.getItem('trust_ai_pair_chain') ?? '', 10);
+      if (stored === 1301) return 1301;
+    } catch { /* private mode */ }
+  }
   if (tokenBySymbol(symbol)) return 1;
   return undefined;
 }
@@ -682,8 +691,12 @@ function AppContent() {
           // guarantees contract-not-found errors on every cycle (the 3k-error
           // console storm). On other chains only the native balance shows.
           if (!cancelled) {
-            const balanceSymbols = Object.keys(TOKENS).filter((sym) => {
+                        const balanceSymbols = Object.keys(TOKENS).filter((sym) => {
               if (sym === 'mUSDC' || sym === 'mUSDT') return wagmiChainIdNum === 1301;
+              // WETH/USDC on Unichain Sepolia = the public real-asset pool's
+              // testnet contracts (see priceFetcher CHAIN_TOKEN_OVERRIDES);
+              // mainnet-addressed reads would soft-fail there.
+              if ((sym === 'WETH' || sym === 'USDC') && wagmiChainIdNum === 1301) return true;
               return wagmiChainIdNum === 1;
             });
             if (balanceSymbols.length === 0) {

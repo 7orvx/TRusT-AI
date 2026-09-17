@@ -657,7 +657,20 @@ export async function getTokenBalance(
   if (!token) return 0;
   if (rpcCircuitOpen(chainId)) return 0;
 
-  const tokenAddress = toChecksumAddress(token.address);
+  // Per-chain address override — keep in sync with the server's
+  // TOKEN_ADDRESS_BY_CHAIN[1301] in apps/server/src/uniswapApi.ts: WETH is
+  // the OP-Stack canonical contract and USDC is the official Unichain
+  // Sepolia testnet faucet token (chain 1301, the public real-asset pool).
+  const CHAIN_TOKEN_OVERRIDES: Record<number, Record<string, Address>> = {
+    1301: {
+      WETH: '0x4200000000000000000000000000000000000006' as Address,
+      USDC: '0x31d0220469e10c4E71834a79b1f276d740d3768F' as Address,
+    },
+  };
+  const overrideAddress = CHAIN_TOKEN_OVERRIDES[chainId]?.[tokenSymbol];
+  const resolvedAddress = (overrideAddress ?? token.address) as Address;
+
+  const tokenAddress = toChecksumAddress(resolvedAddress);
   const ownerAddress = toChecksumAddress(owner);
   // Invalid address or no client → fail SOFT with a quiet debug log (the
   // balance read is decorative UI data; never spam the console or throw).
