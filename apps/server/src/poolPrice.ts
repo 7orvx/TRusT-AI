@@ -20,6 +20,7 @@ import { rpcConfig } from './index.js';
 // table at docs.uniswap.org/contracts/v4/deployments).
 const V4_POOL_MANAGER_BY_NETWORK: Record<string, `0x${string}`> = {
   'unichain-sepolia': '0x00b036b58a818b1bc34d502d3fe730db729e62ac',
+  sepolia: '0xE03A1074c86CFeDd5C142C4F04F1a1536e203543',
   unichain: '0x1f98400000000000000000000000000000000004',
   ethereum: '0x000000000004444c5dc75cB358380D2e3dE08A90',
   arbitrum: '0x360e68faccca8ca495c1b759fd9eee466db9fb32',
@@ -34,6 +35,8 @@ const V4_POOL_MANAGER_BY_NETWORK: Record<string, `0x${string}`> = {
 // where no lens address is cataloged.
 const V4_STATE_VIEW_BY_NETWORK: Record<string, `0x${string}`> = {
   'unichain-sepolia': '0xc199f1072a74d4e905aba1a84d9a45e2546b6222',
+  // Ethereum Sepolia — official v4 deployment (deployments feed).
+  sepolia: '0xE1Dd9c3fA50EDB962E442f60DfBc432e24537E4C',
   unichain: '0x86e8631a016f9068c3f085faf484ee3f5fdee8f2',
   ethereum: '0x7ffe42c4a5deea5b0fec41c94c136cf115597227',
   arbitrum: '0x76fd297e2d437cd7f76d50f01afe6160f86e9990',
@@ -50,6 +53,7 @@ const CHAIN_ID_BY_NETWORK: Record<string, number> = {
   arbitrum: 42161,
   base: 8453,
   polygon: 137,
+  sepolia: 11155111,
 };
 
 // Well-known public RPC fallbacks when the dashboard link is unset/mismatched
@@ -61,6 +65,7 @@ const PUBLIC_RPC_BY_NETWORK: Record<string, string> = {
   arbitrum: 'https://arb1.arbitrum.io/rpc',
   base: 'https://mainnet.base.org',
   polygon: 'https://polygon-rpc.com',
+  sepolia: 'https://ethereum-sepolia-rpc.publicnode.com',
 };
 
 // Per-token decimals + mainnet addresses (mirrors TOKEN_DECIMALS in
@@ -89,6 +94,14 @@ const TESTNET_ADDRESS_BY_NETWORK: Record<string, Record<string, string>> = {
     WETH: '0x4200000000000000000000000000000000000006',
     USDC: '0x31d0220469e10c4E71834a79b1f276d740d3768F',
   },
+  // Ethereum Sepolia: the executable public pair is the NATIVE-ETH pool —
+  // the WETH base resolves to the native sentinel so the PoolKey matches
+  // the on-chain pool (currency0 = zero address). USDC = Circle's official
+  // Sepolia testnet token.
+  sepolia: {
+    WETH: '0x0000000000000000000000000000000000000000',
+    USDC: '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238',
+  },
 };
 
 // PoolKey params per known playground pair (the engine + routeConfig defaults;
@@ -102,6 +115,15 @@ const POOL_KEYS: Record<string, { fee: number; tickSpacing: number } | undefined
   'mUSDT/mUSDC': { fee: 2500, tickSpacing: 25 },
   'WETH/USDC': { fee: 500, tickSpacing: 10 },
 };
+// The 'WETH/USDC' PoolKey differs per network (Unichain Sepolia = the public
+// WETH/USDC pool; Ethereum Sepolia = the public NATIVE-ETH/USDC pool). The
+// table above keeps the Unichain default; the getter overrides per network.
+function poolKeyFor(net: string, pairId: string): { fee: number; tickSpacing: number } | undefined {
+  if (net === 'sepolia' && pairId.toUpperCase() === 'WETH/USDC') {
+    return { fee: 10000, tickSpacing: 200 }; // public nativeETH/USDC tier
+  }
+  return POOL_KEYS[pairId];
+}
 
 export type PriceSource = 'pool' | 'coingecko' | 'synthetic';
 
@@ -169,7 +191,7 @@ interface Slot0Result { sqrtPriceX96: bigint }
 async function readPoolSlot0(pairId: string, net: string): Promise<Slot0Result | null> {
   const poolManager = V4_POOL_MANAGER_BY_NETWORK[net];
   const expectedChainId = CHAIN_ID_BY_NETWORK[net];
-  const poolKey = POOL_KEYS[pairId];
+  const poolKey = poolKeyFor(net, pairId);
   if (!poolManager || expectedChainId === undefined || !poolKey) return null;
 
   const baseEntry = TOKENS[pairId.split('/')[0]];
@@ -304,9 +326,22 @@ export async function getLivePairPrice(
       slot0 = await readPoolSlot0(pairId, net);
       slot0Cache.set(`${net}:${pairId}`, { at: Date.now(), value: slot0 });
     }
-    const base = TOKENS[pairId.split('/')[0]];
-    const quote = TOKENS[pairId.split('/')[1]];
-    if (slot0 && base && quote) {
+    const baseEntry = TOKENS[pairId.split('/')[0]];
+    const quoteEntry = TOKENS[pairId.split('/')[1]];
+    if (slot0 && baseEntry && quoteEntry) {
+      // Apply the SAME per-chain address resolution as readPoolSlot0 — on
+      // testnets the base/quote addresses that built the PoolKey (e.g. the
+      // native sentinel for the Sepolia native-ETH pool) differ from the
+      // mainnet catalog rows, and the sort-order branch would invert.
+      const netOverride = TESTNET_ADDRESS_BY_NETWORK[net];
+      const base = {
+        ...baseEntry,
+        address: netOverride?.[pairId.split('/')[0]]?.toLowerCase() ?? baseEntry.address.toLowerCase(),
+      };
+      const quote = {
+        ...quoteEntry,
+        address: netOverride?.[pairId.split('/')[1]]?.toLowerCase() ?? quoteEntry.address.toLowerCase(),
+      };
       const price = priceFromSlot0(slot0.sqrtPriceX96, base, quote);
       if (Number.isFinite(price) && price > 0) return { price, source: 'pool' };
     }

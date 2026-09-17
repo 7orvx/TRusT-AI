@@ -112,7 +112,9 @@ export async function generateAIDecision(
   // the sepolia → unichain-sepolia v4 remap so the prompt names the pool the
   // encoder will actually target.
   const netForRoute = (getSelectedNetwork() || (rpcConfig && rpcConfig.configured ? rpcConfig.network : undefined) || process.env.NETWORK_NAME || 'sepolia').toLowerCase();
-  const routeNet = netForRoute === 'sepolia' ? 'unichain-sepolia' : netForRoute;
+  // Sepolia hosts its own v4 deployment + public native-ETH/USDC pool now —
+  // no remap to unichain-sepolia (in sync with resolveNetwork/resolveChainToken).
+  const routeNet = netForRoute;
   const [routeBaseSym, routeQuoteSym] = (trigger.pair || '/').split('/');
   const publicPool = getPublicPoolKey(routeNet, routeBaseSym ?? '', routeQuoteSym ?? '');
   const activeRoute = isMockTrigger && routeConfig
@@ -122,7 +124,7 @@ export async function generateAIDecision(
         : ', no hook')
       + ')'
     : publicPool
-    ? `Uniswap v4 (public ${routeNet} pool: fee ${publicPool.fee}, tick spacing ${publicPool.tickSpacing}, no hook)`
+    ? `Uniswap v4 (public ${routeNet} pool: fee ${publicPool.fee}, tick spacing ${publicPool.tickSpacing}, no hook${routeNet === 'sepolia' ? ', native ETH input supported' : ''})`
     : 'Uniswap v4 (standard hookless 0.05% pool, fee 500 / tick spacing 60)';
 
   // Build a compact prompt for downstream LLM providers. Keep it strict but

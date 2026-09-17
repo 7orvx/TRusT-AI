@@ -53,6 +53,13 @@ const UNIVERSAL_ROUTER_EXECUTE_ABI = [
 // uniswap/universal-router `contracts/libraries/Commands.sol` (V4_SWAP = 0x10
 // on both the 2.0.0 tag and main).
 const UR_COMMAND_V4_SWAP = '0x10';
+// Native-ETH settlement (verified against v4-periphery 1.0.3 V4Router.sol +
+// UR Dispatcher.sol): the v4 SETTLE_ALL on the NATIVE currency executes
+// `poolManager.settle{value: amount}()` — the ROUTER pays the PoolManager
+// directly from the tx's msg.value. NO WRAP_ETH command and NO pre-wrap are
+// needed: the PoolKey keeps the native sentinel, SETTLE_ALL(native, amount)
+// consumes msg.value, and TAKE_ALL(native, minOut) sends the output leg back
+// to msg.sender as ETH. The swap tx must carry value_wei = amountIn.
 
 // v4-periphery Actions byte values used by the UR's V4Router module (verified
 // from uniswap/v4-periphery `src/libraries/Actions.sol`, unchanged between the
@@ -93,6 +100,8 @@ const V4_ROUTER_BY_NETWORK: Record<string, `0x${string}`> = {
   arbitrum: '0x8b844f885672f333bc0042cb669255f93a4c1e6b',
   base: '0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7',
   polygon: '0x8b844f885672f333bc0042cb669255f93a4c1e6b',
+  // Ethereum Sepolia testnet — UR 2.1.1 row of the official deployments feed.
+  sepolia: '0x7DfD4F31be6814D2906BDE155c3e1B146EAc1468',
 };
 
 // v4 Quoter per network (V4Quoter lens). The synthetic simulator price (1.0 for
@@ -103,6 +112,12 @@ const V4_ROUTER_BY_NETWORK: Record<string, `0x${string}`> = {
 const V4_QUOTER_BY_NETWORK: Record<string, `0x${string}`> = {
   'unichain-sepolia': '0x56dcd40a3f2d466f48e7f48bdbe5cc9b92ae4472',
   unichain: '0x333e3c607b141b18ff6de9f258db6e77fe7491e0',
+  // Ethereum Sepolia testnet (official deployments feed). NOTE: this
+  // deployment uses the OLDER quoteExactInputSingle signature — the params
+  // struct passed DIRECTLY, not bytes-wrapped (verified on-chain 2026-09-17:
+  // bytes-wrapped → revert, struct-direct → quote). quoteV4Output handles
+  // both, preferring bytes-wrapped (mainnet-era deployments).
+  sepolia: '0x61B3f2011A92d183C7dbaDBdA940a7555Ccf9227',
   ethereum: '0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203',
   arbitrum: '0x3972c00f7ed4885e145823eb7c655375d275a1c5',
   base: '0x0d5e0f971ed27fbff6c2837bf31316121532048d',
@@ -118,9 +133,8 @@ const CHAIN_ID_BY_NETWORK: Record<string, number> = {
   arbitrum: 42161,
   base: 8453,
   polygon: 137,
-  // Sepolia only hosts the legacy v3 router (removed); v4 swaps target
-  // Ethereum mainnet, Unichain and Unichain Sepolia. Kept here so the chain
-  // guard can answer precisely instead of falling through.
+  // Sepolia now hosts a real v4 deployment AND a public nativeETH/USDC pool
+  // (chain-verified 2026-09-17) — testnet v4 routes are no longer remapped.
   sepolia: 11155111,
 };
 
@@ -137,7 +151,8 @@ function rpcCandidates(net: string): string[] {
     ethereum: 'https://eth.llamarpc.com',
     arbitrum: 'https://arb1.arbitrum.io/rpc',
     base: 'https://mainnet.base.org',
-    polygon: 'https://polygon-rpc.com'
+    polygon: 'https://polygon-rpc.com',
+    sepolia: 'https://ethereum-sepolia-rpc.publicnode.com'
   };
   const fallback = publicRpc[net];
   if (fallback) list.push(fallback);
@@ -163,48 +178,86 @@ async function quoteV4Output(
   // The deployed-era quoter interface takes uint128 amounts.
   if (amountInWei >= (1n << 128n)) return null;
   const [currency0, currency1] = [tokenIn, tokenOut].sort((a, b) => (a < b ? -1 : 1));
+  // Two deployment eras of the V4Quoter exist. NEWER deployments take the
+  // params as ONE bytes-wrapped struct arg (quoteExactInputSingle(bytes),
+  // bytes = abi.encode(QuoteExactSingleParams)); OLDER ones — e.g. the
+  // Sepolia deployment, verified on-chain 2026-09-17 — take the
+  // QuoteExactSingleParams struct DIRECTLY. quoteExactInputSingleEra tries
+  // bytes-wrapped first, then struct-direct; a wrong-signature call reverts
+  // or returns empty.
+  const paramsTuple = [
+    [currency0, currency1, fee, tickSpacing, hooks],
+    tokenIn === currency0,
+    amountInWei,
+    '0x'
+  ] as const;
+  const quoteAbis = {
+    wrapped: [{
+      name: 'quoteExactInputSingle',
+      type: 'function' as const,
+      stateMutability: 'nonpayable' as const,
+      inputs: [{ type: 'bytes' as const }],
+      outputs: [{ type: 'uint256' as const }, { type: 'uint256' as const }]
+    }],
+    direct: [{
+      name: 'quoteExactInputSingle',
+      type: 'function' as const,
+      stateMutability: 'nonpayable' as const,
+      inputs: [{
+        type: 'tuple' as const, components: [
+          { type: 'tuple' as const, components: [
+            { type: 'address' as const }, { type: 'address' as const }, { type: 'uint24' as const }, { type: 'int24' as const }, { type: 'address' as const }
+          ] },
+          { type: 'bool' as const },
+          { type: 'uint128' as const },
+          { type: 'bytes' as const }
+        ]
+      }],
+      outputs: [{ type: 'uint256' as const }, { type: 'uint256' as const }]
+    }]
+  };
+  const wrappedBytes = encodeAbiParameters(
+    quoteAbis.direct[0].inputs as unknown as Parameters<typeof encodeAbiParameters>[0],
+    [paramsTuple] as unknown as Parameters<typeof encodeAbiParameters>[1]
+  );
+  const quoteExactInputSingleEra = async (client: ReturnType<typeof createPublicClient>): Promise<bigint | undefined> => {
+    const attempts: readonly { data: `0x${string}` }[] = [
+      {
+        data: encodeFunctionData({ abi: quoteAbis.wrapped, functionName: 'quoteExactInputSingle', args: [wrappedBytes] })
+      },
+      {
+        data: encodeFunctionData({
+          abi: quoteAbis.direct,
+          functionName: 'quoteExactInputSingle',
+          args: [paramsTuple as unknown as never]
+        })
+      }
+    ];
+    for (const attempt of attempts) {
+      try {
+        const res = await client.call({ to: quoter, data: attempt.data });
+        if (!res.data || res.data === '0x') continue;
+        const decoded = decodeFunctionResult({
+          abi: [{ name: 'quoteExactInputSingle', type: 'function', stateMutability: 'nonpayable', inputs: [], outputs: [{ type: 'uint256' }, { type: 'uint256' }] }],
+          functionName: 'quoteExactInputSingle',
+          data: res.data
+        });
+        // viem returns multi-output tuples positionally — index, not name.
+        const out = Array.isArray(decoded) ? decoded[0] as bigint | undefined : undefined;
+        if (typeof out === 'bigint' && out > 0n) return out;
+      } catch {
+        // Wrong signature era for this deployment — try the next one.
+      }
+    }
+    return undefined;
+  };
   for (const rpcUrl of rpcCandidates(net)) {
     try {
       const client = createPublicClient({ transport: http(rpcUrl, { timeout: 8000 }) });
       const chainId = await client.getChainId();
       if (chainId !== expectedChainId) continue; // wrong-chain link, try next candidate
-      const data = encodeFunctionData({
-        abi: [{
-          name: 'quoteExactInputSingle',
-          type: 'function',
-          stateMutability: 'nonpayable',
-          // The deployed V4Quoter takes ONE struct param —
-          // QuoteExactSingleParams { poolKey, zeroForOne, exactAmountIn (uint128), hookData }.
-          // A positional (poolKey, bool, uint128, bytes) encoding lays the
-          // offsets out differently and the quoter reverts on it (verified
-          // on-chain: positional → revert, single-struct → quote returned).
-          inputs: [
-            {
-              type: 'tuple', components: [
-                {
-                  type: 'tuple', components: [
-                    { type: 'address' }, { type: 'address' }, { type: 'uint24' }, { type: 'int24' }, { type: 'address' }
-                  ]
-                },
-                { type: 'bool' },
-                { type: 'uint128' },
-                { type: 'bytes' }
-              ]
-            }
-          ],
-          outputs: [{ type: 'uint256' }, { type: 'uint256' }]
-        }],
-        functionName: 'quoteExactInputSingle',
-        args: [[[currency0, currency1, fee, tickSpacing, hooks], tokenIn === currency0, amountInWei, '0x']]
-      });
-      const res = await client.call({ to: quoter, data });
-      if (!res.data || res.data === '0x') continue;
-      const [amountOut] = decodeFunctionResult({
-        abi: [{ name: 'quoteExactInputSingle', type: 'function', stateMutability: 'nonpayable', inputs: [], outputs: [{ type: 'uint256' }, { type: 'uint256' }] }],
-        functionName: 'quoteExactInputSingle',
-        data: res.data
-      });
-      return amountOut;
+      const amountOut = await quoteExactInputSingleEra(client);
+      if (amountOut !== undefined) return amountOut;
     } catch {
       // Quoter/RPC unavailable — fall through to the next candidate, then to synthetic.
     }
@@ -221,6 +274,8 @@ async function quoteV4Output(
 //   - arbitrum/base/polygon: see docs.uniswap.org/contracts/v4/deployments
 const V4_POOL_MANAGER_BY_NETWORK: Record<string, `0x${string}`> = {
   'unichain-sepolia': '0x00b036b58a818b1bc34d502d3fe730db729e62ac',
+  // Ethereum Sepolia testnet — official v4 deployment (labs-launched).
+  sepolia: '0xE03A1074c86CFeDd5C142C4F04F1a1536e203543',
   unichain: '0x1f98400000000000000000000000000000000004',
   ethereum: '0x000000000004444c5dc75cB358380D2e3dE08A90',
   arbitrum: '0x360e68faccca8ca495c1b759fd9eee466db9fb32',
@@ -313,6 +368,13 @@ const TOKEN_ADDRESS_BY_CHAIN: Record<number, Record<string, `0x${string}`>> = {
     WETH: '0x4200000000000000000000000000000000000006',
     USDC: '0x31d0220469e10c4E71834a79b1f276d740d3768F',
   },
+  11155111: { // Ethereum Sepolia (chain-verified 2026-09-17)
+    // USDC = Circle's official Sepolia testnet token (symbol() == 'USDC').
+    // WETH is intentionally ABSENT: the executable Sepolia pair is the
+    // PUBLIC native-ETH pool (currency0 = zero address) — the encoder maps
+    // the WETH base token to native ETH there, and the UR wraps natively.
+    USDC: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
+  },
   130: { // Unichain mainnet (source: Uniswap Token List — verified 2026-09-16)
     WETH: '0x4200000000000000000000000000000000000006',
     WBTC: '0x927B51f251480a681271180DA4de28D44EC4AfB8',
@@ -360,10 +422,16 @@ const TOKEN_ADDRESS_BY_CHAIN: Record<number, Record<string, `0x${string}`>> = {
  * mainnet addresses into calldata that would revert on-chain (wasted gas).
  */
 function resolveChainToken(chainId: number | undefined, address: string): `0x${string}` {
-  if (chainId !== 42161 && chainId !== 8453 && chainId !== 137 && chainId !== 130 && chainId !== 1301) {
+  if (chainId !== 42161 && chainId !== 8453 && chainId !== 137 && chainId !== 130 && chainId !== 1301 && chainId !== 11155111) {
     return address.toLowerCase() as `0x${string}`;
   }
   const sym = SYMBOL_BY_ADDRESS[address.toLowerCase()];
+  // Sepolia special case: the public pool's base is native ETH (zero
+  // address). The engine emits mainnet WETH for the pair base — translate it
+  // to the native sentinel so the UR wraps the user's ETH automatically.
+  if (chainId === 11155111 && (sym === 'WETH' || address.toLowerCase() === '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2')) {
+    return '0x0000000000000000000000000000000000000000';
+  }
   const mapped = sym ? TOKEN_ADDRESS_BY_CHAIN[chainId]?.[sym] : undefined;
   if (!mapped) {
     throw new Error(
@@ -399,6 +467,14 @@ function getTokenDecimals(address: string): number {
 interface PublicPoolKey { baseSymbol: string; quoteSymbol: string; fee: number; tickSpacing: number }
 const PUBLIC_POOL_KEY_BY_NETWORK: Record<string, PublicPoolKey | undefined> = {
   'unichain-sepolia': { baseSymbol: 'WETH', quoteSymbol: 'USDC', fee: 500, tickSpacing: 10 },
+  // Ethereum Sepolia: PUBLIC native-ETH/USDC pool (fee 1% tier, chain-verified
+  // 2026-09-17 via StateView liquidity + live V4Quoter quote on BOTH legs:
+  // 0.001 ETH → 32.19 USDC, 30000 USDC → 0.9288 ETH). currency0 = native ETH
+  // (zero address) — the UR wraps automatically, so a user holding only
+  // native ETH can swap with NO wrap and NO approve, single transaction.
+  // The fee-500/10 and 3000/60 native tiers also exist (thinner); 10000/200
+  // is the deepest. See apps/server/scripts/probe-sepolia-pools.mjs.
+  sepolia: { baseSymbol: 'WETH', quoteSymbol: 'USDC', fee: 10000, tickSpacing: 200 },
 };
 
 // Returns the public pool key when the monitored pair IS the network's public
@@ -440,10 +516,6 @@ function resolveNetwork(trigger?: MarketTrigger): { net: string; networkLabel: s
   const configuredNetwork = getSelectedNetwork() || (rpcConfig && rpcConfig.configured ? rpcConfig.network : undefined);
   const resolvedNetwork = configuredNetwork || (process.env.NETWORK_NAME || 'sepolia');
   let net = resolvedNetwork.toLowerCase();
-  // Sepolia testnet does not host Uniswap v4 Universal Router; default testnet v4 routes to unichain-sepolia.
-  if (net === 'sepolia') {
-    net = 'unichain-sepolia';
-  }
   const networkLabel =
     net === 'unichain-sepolia' ? 'UNICHAIN-SEPOLIA' :
       net === 'unichain' ? 'UNICHAIN' :
@@ -521,6 +593,8 @@ function encodeV4SwapCalldata(args: {
 
   // Action 2: SETTLE_ALL(currencyIn, amountIn) — the router pays the input
   // leg. ERC20 inputs are pulled via Permit2 (the client pre-approves).
+  // Native inputs (zero address) are settled from the tx's msg.value —
+  // poolManager.settle{value: amount}() — no wrap, no approve.
   const settleParams = encodeAbiParameters(
     [{ type: 'address' }, { type: 'uint256' }],
     [tokenInNorm, amountInWei]
@@ -707,9 +781,11 @@ export async function getUniswapSwapData(
     return {
       to_address: routerAddress,
       calldata,
-      // v4 input legs are ERC20s in the current catalog (no native-ETH pool):
-      // the UR pulls them via Permit2, so the tx carries no payable value.
-      value_wei: effectiveTokenInNorm === '0x0000000000000000000000000000000000000000' ? amountInWei.toString() : '0',
+      // Native-ETH input (chainTokenIn = zero address after resolveChainToken,
+      // e.g. the Sepolia public pool's WETH base): the tx MUST carry
+      // msg.value = amountIn so the UR's WRAP_ETH command has ETH to wrap.
+      // ERC20 inputs: no value (Permit2 pull).
+      value_wei: chainTokenIn === '0x0000000000000000000000000000000000000000' ? amountInWei.toString() : '0',
       route_summary: `${trigger.pair} via Uniswap v4 Universal Router (${networkLabel}) | fee ${fee} · tick ${tickSpacing} · ${hookLabel}${permissionLabel} · ${minOutLabel}`,
       estimated_gas_units: 350000,
       router_name: `Uniswap v4 Universal Router (${networkLabel})`,

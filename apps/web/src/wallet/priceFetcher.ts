@@ -666,6 +666,9 @@ export async function getTokenBalance(
       WETH: '0x4200000000000000000000000000000000000006' as Address,
       USDC: '0x31d0220469e10c4E71834a79b1f276d740d3768F' as Address,
     },
+    11155111: {
+      USDC: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238' as Address,
+    },
   };
   const overrideAddress = CHAIN_TOKEN_OVERRIDES[chainId]?.[tokenSymbol];
   const resolvedAddress = (overrideAddress ?? token.address) as Address;

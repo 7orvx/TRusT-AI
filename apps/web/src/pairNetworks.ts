@@ -32,6 +32,7 @@ export const PICKER_NETWORKS: PickerNetwork[] = [
   { chainId: 137, networkKey: 'polygon', label: 'Polygon' },
   { chainId: 130, networkKey: 'unichain', label: 'Unichain' },
   { chainId: 1301, networkKey: 'unichain-sepolia', label: 'Unichain Sepolia' },
+  { chainId: 11155111, networkKey: 'sepolia', label: 'Sepolia' },
 ];
 
 const NETWORK_KEY_BY_CHAIN_ID = new Map(PICKER_NETWORKS.map((n) => [n.chainId, n.networkKey]));
@@ -62,6 +63,7 @@ const CHAIN_TOKEN_COVERAGE: Record<number, Set<string>> = {
   137: new Set(['WETH', 'WBTC', 'USDC', 'USDT', 'LINK', 'UNI', 'DAI', 'AAVE']), // 8
   130: new Set(['WETH', 'WBTC', 'USDC', 'USDT', 'LINK', 'UNI', 'DAI', 'LDO', 'AAVE']), // 9 — verified via Uniswap Token List (2026-09-16)
   1301: new Set(['mUSDC', 'mUSDT', 'WETH', 'USDC']), // mock playground + public real-asset WETH/USDC pool
+  11155111: new Set(['WETH', 'USDC']), // PUBLIC native-ETH/USDC pool — swap with native ETH, no wrap/approve
 };
 
 /** Cap for dynamic (price-only, non-registry) tokens shown per network tab —

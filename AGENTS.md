@@ -145,7 +145,7 @@ this table (historically the README said `AI_PROVIDER`; the code reads
 | `OLLAMA_BASE_URL` | server | `http://localhost:11434` | Local Ollama server (keyless provider) |
 | `OLLAMA_CLOUD_MODEL` | server | `gemma4:31b` | Model id for the `ollama_cloud` provider (https://ollama.com, `Authorization: Bearer` key from ollama.com/settings/keys) |
 | `OLLAMA_MODEL` | server | `deepseek-r1:latest` | |
-| `UNISWAP_V4_ROUTER` | server | per-network v4 Universal Router | Explicit override; otherwise resolved from `NETWORK_NAME` (`unichain-sepolia` → `0xf705…`, `unichain` → `0xef74…`, `ethereum` → `0x4c82…`). The only swap route — the legacy v3 path was removed (2026-09-15) |
+| `UNISWAP_V4_ROUTER` | server | per-network v4 Universal Router | Explicit override; otherwise resolved from `NETWORK_NAME` (`unichain-sepolia` → `0xf705…`, `unichain` → `0xef74…`, `ethereum` → `0x4c82…`, `sepolia` → `0x7DfD…`, see §7 #24). The only swap route — the legacy v3 path was removed (2026-09-15) |
 | `DEFAULT_SLIPPAGE_BPS` | server | `50` | Initial max slippage |
 | `SERVER_URL` / `SERVER_HOST` | engine | — | Optional overrides for orchestrator discovery |
 | `NETWORK_NAME` | engine, server | `sepolia` | Display label; also drives the Uniswap route summary in `uniswapApi.ts` |
@@ -594,10 +594,41 @@ and kills both sidecars on exit. Two runtime contracts matter for desktop builds
     precedence between the mock playground and the generic 0.05% tier. The
     testnet USDC is a faucet token with NO dollar peg: monitor/route show
     the real pool price as-is. The mUSDC/mUSDT playground stays intact.
+24. ✅ **Sepolia native-ETH test pool — done (2026-09-17).** A user holding
+    only native ETH can now run a REAL end-to-end v4 swap with NO wrap and NO
+    approve: Ethereum Sepolia hosts an official v4 deployment AND a public
+    hookless native-ETH/USDC pool (fee 10000 / tick 200, poolId
+    `0x8439998c…eb9d`; StateView-verified liquidity + live V4Quoter quotes on
+    both legs). Contract map additions (`uniswapApi.ts`/`poolPrice.ts`, from
+    the official deployments feed): PoolManager `0xE03A…3543`, StateView
+    `0xE1Dd…7E4C`, V4Quoter `0x61B3…9227`, UR 2.1.1 `0x7DfD…1468`; USDC =
+    Circle's Sepolia faucet token `0x1c7D…7238` (chain-verified via
+    `symbol()`). Key mechanics: (a) the Sepolia V4Quoter uses the OLDER
+    struct-direct `quoteExactInputSingle` signature — `quoteV4Output` now
+    tries bytes-wrapped then struct-direct (newer deployments); (b) the v4
+    `SETTLE_ALL` on the NATIVE currency executes
+    `poolManager.settle{value: amount}()` from the ROUTER's msg.value — no
+    WRAP_ETH command, no pre-wrap; the swap tx carries `value_wei = amountIn`
+    and the client skips Permit2 approvals when `value_wei > 0` (existing
+    behavior); (c) the WETH base token resolves to the native sentinel
+    (`resolveChainToken`) so the PoolKey matches the on-chain native pool;
+    (d) the `sepolia → unichain-sepolia` network remap is REMOVED — Sepolia
+    now routes to its own v4 stack (the pair picker gained a Sepolia tab,
+    coverage WETH/USDC). Native take returns ETH directly to msg.sender.
+    The Sepolia USDC is faucet (no dollar peg) — pool price (~38k) is real
+    and consistent with the quoter. E2E: `apps/server/scripts/
+    verify-public-route.ts` PASS 15/15 incl. Unichain regression.
+25. **Pool-read asset mismatch (theoretical).** The slot0 reader keys pool
+    state by pairId+network; pairs sharing a symbol pair across testnets
+    resolve through per-network token overrides. A future network whose
+    WETH is NOT native (e.g. a WETH-only pool on a chain where 0x4200…0006
+    exists) must keep `TESTNET_ADDRESS_BY_NETWORK`/`TOKEN_ADDRESS_BY_CHAIN`
+    in sync with `PUBLIC_POOL_KEY_BY_NETWORK` or the PoolKey will point at a
+    nonexistent pool (fails safely at quote time).
     Discovery/verification tooling lives in `apps/server/scripts/`
     (discover-v4-pools / identify-v4-pools / check-public-pool /
-    verify-public-route) and can be re-run on any chain by swapping the RPC
-    + PoolManager constants — including Sepolia Ethereum, should the
+    probe-sepolia-pools / verify-public-route) and can be re-run on any chain
+    by swapping the RPC + PoolManager constants.
     Unichain pool ever be too thin for a test trade.
 ---
 
@@ -792,6 +823,12 @@ working notes (original roadmap, product conversations): `docs/internal/`
   live slot0 reader works again (StateView lens + positional decode +
   decimal-aware conversion — see §7 #22). The mUSDC/mUSDT playground remains
   first-class. Reusable on-chain discovery scripts in `apps/server/scripts/`.
+- ✅ **Sepolia native-ETH test pool — done (2026-09-17):** the pair picker
+  gained a Sepolia tab; WETH/USDC there routes through the PUBLIC
+  native-ETH/USDC v4 pool (fee 10000 / tick 200) with NATIVE ETH input —
+  the swap tx carries msg.value, no wrap, no approve (§7 #24). The
+  `sepolia → unichain-sepolia` route remap is gone; Sepolia has its own v4
+  contract stack (PM/StateView/Quoter/UR from the official deployments feed).
 - 🔜 **Phase 4 — live on-chain feed (first slice landed, 2026-09-15):**
   `apps/server/src/poolPrice.ts` reads the REAL v4 pool price (`getSlot0` on
   the PoolManager, poolId derived from the pair's PoolKey) through the user's

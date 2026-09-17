@@ -335,10 +335,11 @@ function knownChainOf(symbol: string): number | undefined {
   // WETH/USDC under the Unichain Sepolia tab = the PUBLIC real-asset test
   // pool (the registry's mainnet-addressed WETH/USDC still resolve to 1 for
   // the other tabs; the tab-picked execution chain wins at push time).
+  // Sepolia (11155111): same pair — the public NATIVE-ETH/USDC pool.
   if ((symbol === 'WETH' || symbol === 'USDC') && typeof window !== 'undefined') {
     try {
       const stored = parseInt(localStorage.getItem('trust_ai_pair_chain') ?? '', 10);
-      if (stored === 1301) return 1301;
+      if (stored === 1301 || stored === 11155111) return stored;
     } catch { /* private mode */ }
   }
   if (tokenBySymbol(symbol)) return 1;
@@ -696,7 +697,7 @@ function AppContent() {
               // WETH/USDC on Unichain Sepolia = the public real-asset pool's
               // testnet contracts (see priceFetcher CHAIN_TOKEN_OVERRIDES);
               // mainnet-addressed reads would soft-fail there.
-              if ((sym === 'WETH' || sym === 'USDC') && wagmiChainIdNum === 1301) return true;
+              if ((sym === 'WETH' || sym === 'USDC') && (wagmiChainIdNum === 1301 || wagmiChainIdNum === 11155111)) return true;
               return wagmiChainIdNum === 1;
             });
             if (balanceSymbols.length === 0) {
