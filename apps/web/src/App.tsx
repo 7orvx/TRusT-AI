@@ -25,7 +25,8 @@ import {
   EyeOff,
   KeyRound,
   Wifi,
-  Check
+  Check,
+  Loader2
 } from 'lucide-react';
 import { decodeFunctionResult, encodeFunctionData } from 'viem';
 import { WalletProviders } from './wallet/WalletProviders';
@@ -744,7 +745,16 @@ function AppContent() {
   // only speaks by streaming triggers, so first decision == engine alive).
   const [engineAlive, setEngineAlive] = useState(false);
   const [activeTxHash, setActiveTxHash] = useState<string | null>(null);
-  const [txStatus, setTxStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
+  // Lifecycle of a wallet transaction:
+  //   idle      → no execution in progress
+  //   pending   → approval/signature flow — wallet popup open or waiting for
+  //               the user; the signal lock freezes the swap card
+  //   confirming→ tx SUBMITTED (hash known) but not yet mined; the lock stays
+  //               held and signals keep queueing until the receipt lands
+  //   success   → receipt confirmed (status 0x1) — the lock is released and
+  //               the queued signals become the next card
+  //   error     → rejected / reverted / timeout — the lock is released
+  const [txStatus, setTxStatus] = useState<'idle' | 'pending' | 'confirming' | 'success' | 'error'>('idle');
   // Execution sub-step shown while txStatus === 'pending' (approve vs swap).
   const [txStep, setTxStep] = useState<'approve' | 'swap' | null>(null);
   // Phase 4 — source label of the monitor price reported by the orchestrator
@@ -828,6 +838,17 @@ function AppContent() {
   // Whether the displayed signal belongs to the pair currently on screen
   // ('ALL' shows every real pair; the mock pair only when it is selected).
   const signalIsCurrent = !latestEvent || signalPairMatchesSelection(latestEvent.trigger.pair, selectedPair);
+
+  // Single source of truth for the price SHOWN alongside the current signal
+  // (monitor header + AI signal card): the server-stamped trigger price. The
+  // orchestrator overwrites the engine's synthetic payload before broadcasting
+  // (getLivePairPrice: v4 slot0 → CoinGecko ratio → synthetic), so every
+  // NEW_DECISION carries the real number + its `price_source` label — the same
+  // number the LLM prompt, the budget math and the feed use. CoinGecko USD
+  // ratios (liveUsdPrices) are NOT mixed in here: on Sepolia the faucet USDC
+  // has no dollar peg and the ratio diverged from the pool price (monitor said
+  // $2,572 while the feed said $35,942 for the same block).
+  const liveSignalPrice = latestEvent && signalIsCurrent ? latestEvent.trigger.current_price : undefined;
   const [logs, setLogs] = useState<EventLog[]>([]);
 
   // Dynamic token universe for the picker: top ~100 tokens by market cap
@@ -999,6 +1020,11 @@ function AppContent() {
       // Acquired inside the try so the finally below releases it on every
       // early exit (budget rejection, chain mismatch, wallet errors, success).
       if (swapInFlightRef.current) return;
+      // A confirmed signal is finished — re-clicking its button must never
+      // fire a second identical swap (the next signal replaces the card).
+      // Retries after 'error' stay allowed: a wallet rejection can be retried
+      // at will on the same signal.
+      if (txStatus === 'success') return;
       swapInFlightRef.current = true;
       setIsSwapInFlight(true);
 
@@ -1213,11 +1239,22 @@ function AppContent() {
           params: [v4TxParams]
         });
         const v4NormalizedHash = normalizeTxHash(v4TxHashResult);
-        if (v4NormalizedHash) {
-          setActiveTxHash(v4NormalizedHash);
+        if (!v4NormalizedHash) {
+          // eth_sendTransaction resolved without a usable hash — nothing to
+          // track; surface it as a failed cycle.
+          alert('The wallet did not return a transaction hash. The swap may not have been submitted.');
+          setTxStatus('error');
+          setTxStep(null);
+          return;
         }
+        setActiveTxHash(v4NormalizedHash);
         setTxStep(null);
-        setTxStatus('success');
+        // Submission is NOT completion: on WalletConnect the phone returns the
+        // hash and the signature/confirmation happens on the device. Hold the
+        // signal lock and show 'confirming' until the receipt is mined.
+        setTxStatus('confirming');
+        const outcome = await waitForSwapConfirmation(ethereum, v4NormalizedHash);
+        setTxStatus(outcome);
         return;
       }
     } catch (err: any) {
@@ -1298,12 +1335,20 @@ function AppContent() {
             } else if (signalPairMatchesSelection(newLog.trigger.pair, selectedPairRef.current)) {
               // Fresh signal for the SELECTED pair: unhide the swap card and
               // drop any stale tx banner (it belonged to the previous
-              // signal's card).
-              setDismissedEventId(null);
-              setTxStatus('idle');
-              setTxStep(null);
-              setActiveTxHash(null);
-              setLatestEvent(newLog);
+              // signal's card). Never while the wallet tx lifecycle is still
+              // running — the card (and the banner: pending spinner, 'Confirm
+              // in wallet...', confirming receipt poll, or the final
+              // success/error) must survive untouched until the receipt lands
+              // or the user rejects; queued signals are counted instead.
+              if (!swapInFlightRef.current) {
+                setDismissedEventId(null);
+                setTxStatus('idle');
+                setTxStep(null);
+                setActiveTxHash(null);
+                setLatestEvent(newLog);
+              } else {
+                setSkippedSignalCount((c) => c + 1);
+              }
             } else {
               // Signal for a pair other than the one selected (the engine
               // stream still resolves the previous monitored_pair): feed-only.
@@ -1506,21 +1551,58 @@ function AppContent() {
     handleUpdateSettings(undefined, undefined, undefined, newKeys);
   };
 
+  // Hard cap per base token family: ETH/WETH pairs cap at 1, everything else
+  // caps at 1000. Prevents accidental fat-finger entries that would drain the
+  // wallet or exceed reasonable test budgets.
+  // On-chain confirmation of the swap tx: polls eth_getTransactionReceipt
+  // through the wallet session until the tx is mined. Returns 'success' for a
+  // 0x1 receipt, 'error' for a 0x0 receipt (reverted on-chain), or 'error'
+  // on timeout with the tx still unmined (the user can judge it on the
+  // explorer). Mobile WalletConnect sessions need this because eth_sendTransaction
+  // resolves at SUBMISSION time — the signature prompt can stay open on the
+  // phone long after the desktop app returned.
+  const waitForSwapConfirmation = async (
+    ethereum: EIP1193,
+    txHash: string,
+    timeoutMs = 180000
+  ): Promise<'success' | 'error'> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const receipt: any = await ethereum.request({ method: 'eth_getTransactionReceipt', params: [txHash] });
+        if (receipt) return receipt.status === '0x1' ? 'success' : 'error';
+      } catch {
+        // Provider busy / disconnected — keep polling.
+      }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    return 'error';
+  };
+
+  const isEthBase = budgetSymbol === 'WETH' || budgetSymbol === 'ETH';
+  const budgetHardCap = isEthBase ? 1 : 1000;
+  const budgetPresets = isEthBase ? [0.01, 0.05, 0.1, 0.5, 1] : [5, 20, 50, 100, 500, 1000];
+
   // Validates + saves the per-signal budget for the active pair's base token.
-  // Rules: > 0 always; for WETH/ETH-base pairs with a connected wallet it must
-  // stay below the wallet's native ETH balance (never the whole wallet, never
-  // zero). Other tokens skip the balance check (chain-aware balances = Phase 4).
-  const applyBudget = () => {
-    const v = Number(budgetDraft);
+  // Rules: > 0 always; below hard cap; for WETH/ETH-base pairs with a
+  // connected wallet it must stay below the wallet's native ETH balance.
+  const applyBudget = (overrideValue?: number) => {
+    const v = overrideValue !== undefined ? overrideValue : Number(budgetDraft);
     if (!Number.isFinite(v) || v <= 0) {
       setBudgetError('Budget must be greater than zero.');
       return;
     }
-    if (budgetSymbol === 'WETH' && account && balance && v >= Number(balance)) {
+    if (v > budgetHardCap) {
+      setBudgetError(`Maximum budget for ${budgetSymbol} is ${budgetHardCap}${isEthBase ? ' ETH' : ''}.`);
+      return;
+    }
+    if (isEthBase && account && balance && v >= Number(balance)) {
       setBudgetError(`Budget must be smaller than your wallet balance (${balance} ETH).`);
       return;
     }
     setBudgetError(null);
+    setBudgetDraft(String(v));
     setMaxTradeAmountEth(v);
     const next = { ...budgetsByToken, [budgetSymbol]: v };
     setBudgetsByToken(next);
@@ -1562,7 +1644,7 @@ function AppContent() {
   // dismissal: while the wallet popup is open the only way out is rejecting
   // there.
   const handleCancelSignal = () => {
-    if (isSwapInFlight || txStatus === 'pending' || !latestEvent) return;
+    if (isSwapInFlight || txStatus === 'pending' || txStatus === 'confirming' || !latestEvent) return;
     setDismissedEventId(latestEvent.id);
     setTxStatus('idle');
     setTxStep(null);
@@ -2093,13 +2175,34 @@ function AppContent() {
                   </div>
                   <div style={{ display: 'flex', gap: '8px' }}>
                     <input
-                      type="number" min="0.01" step="0.01"
+                      type="number" min="0.001" step="0.001" max={budgetHardCap}
                       value={budgetDraft}
                       onChange={(e) => { setBudgetDraft(e.target.value); setBudgetError(null); }}
                       onKeyDown={(e) => { if (e.key === 'Enter') applyBudget(); }}
                       style={{ flex: 1, padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }}
                     />
-                    <button onClick={applyBudget} style={{ padding: '8px 14px', background: 'rgba(16, 185, 129, 0.15)', border: '1px solid var(--accent-green)', color: 'var(--accent-green)', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer' }}>Apply</button>
+                    <button onClick={() => applyBudget()} style={{ padding: '8px 14px', background: 'rgba(16, 185, 129, 0.15)', border: '1px solid var(--accent-green)', color: 'var(--accent-green)', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer' }}>Apply</button>
+                  </div>
+                  {/* Preset chips — one click sets + auto-applies */}
+                  <div style={{ display: 'flex', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}>
+                    {budgetPresets.map((preset) => (
+                      <button
+                        key={preset}
+                        onClick={() => applyBudget(preset)}
+                        style={{
+                          padding: '5px 12px', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700,
+                          fontFamily: 'var(--font-mono)', cursor: 'pointer', transition: 'all 0.15s ease',
+                          background: maxTradeAmountEth === preset ? 'rgba(16, 185, 129, 0.25)' : 'rgba(255,255,255,0.04)',
+                          border: `1px solid ${maxTradeAmountEth === preset ? 'var(--accent-green)' : 'rgba(255,255,255,0.10)'}`,
+                          color: maxTradeAmountEth === preset ? 'var(--accent-green)' : 'var(--text-muted)'
+                        }}
+                      >
+                        {preset} {budgetSymbol}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)', marginTop: '6px' }}>
+                    Max allowed: {budgetHardCap} {budgetSymbol}{isEthBase ? ' (testnet safety)' : ''}
                   </div>
                   {budgetError && <div style={{ fontSize: '0.72rem', color: 'var(--accent-red)', marginTop: '4px' }}>{budgetError}</div>}
                 </div>
@@ -2133,15 +2236,10 @@ function AppContent() {
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px' }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                      <div>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginBottom: '4px' }}>Pool Fee Tier</div>
-                        <input type="number" value={v4Fee} onChange={(e) => setV4Fee(Number(e.target.value))} onBlur={() => handleUpdateSettings(undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { v4Fee })} style={{ width: '100%', padding: '8px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }} />
-                      </div>
-                      <div>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginBottom: '4px' }}>Tick Spacing</div>
-                        <input type="number" value={v4TickSpacing} onChange={(e) => setV4TickSpacing(Number(e.target.value))} onBlur={() => handleUpdateSettings(undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { v4TickSpacing })} style={{ width: '100%', padding: '8px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }} />
-                      </div>
+                    <div>
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginBottom: '4px' }}>Pool Fee Tier (playground / custom pool only)</div>
+                      <input type="number" value={v4Fee} onChange={(e) => setV4Fee(Number(e.target.value))} onBlur={() => handleUpdateSettings(undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { v4Fee })} style={{ width: '100%', padding: '8px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }} />
+                      <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: '4px', fontStyle: 'italic' }}>Tick spacing is resolved automatically from the on-chain pool — no manual input needed.</div>
                     </div>
                     <div>
                       <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginBottom: '4px' }}>Hook Address</div>
@@ -2153,7 +2251,7 @@ function AppContent() {
                     </div>
                 </div>
 
-                <button className="force-swap-btn" onClick={handleForceTestSwap} disabled={txStatus === 'pending'}>
+                <button className="force-swap-btn" onClick={handleForceTestSwap} disabled={txStatus === 'pending' || txStatus === 'confirming'}>
                   Force Test Swap — mUSDC/mUSDT (Unichain Sepolia)
                 </button>
               </div>
@@ -2597,12 +2695,18 @@ function AppContent() {
                     : `REAL-TIME MONITOR · ${selectedPair}`}
                 </div>
                 <div style={{ fontSize: '1.8rem', fontWeight: 800, color: '#ffffff', letterSpacing: '-0.5px', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  {(liveUsdPrices[pairBase] && liveUsdPrices[pairQuote] && liveUsdPrices[pairQuote] > 0)
-                    ? `$${fmtPrice(liveUsdPrices[pairBase] / liveUsdPrices[pairQuote])}`
-                    : livePrices[`${pairBase}/${pairQuote}`]
-                    ? `$${fmtPrice(livePrices[`${pairBase}/${pairQuote}`])}`
-                    : '—'}
-                  {priceSource !== 'synthetic' && (
+                  {(() => {
+                    // The headline price IS the signal's price (server-stamped:
+                    // live v4 slot0 → CoinGecko ratio → synthetic), matching the
+                    // feed and the swap math by construction. CoinGecko USD ratios
+                    // only back the cold start (no signal yet) — on testnets the
+                    // faucet quote token has no dollar peg and diverges from the pool.
+                    if (liveSignalPrice !== undefined) return `$${fmtPrice(liveSignalPrice)}`;
+                    if (liveUsdPrices[pairBase] && liveUsdPrices[pairQuote] && liveUsdPrices[pairQuote] > 0) return `$${fmtPrice(liveUsdPrices[pairBase] / liveUsdPrices[pairQuote])}`;
+                    if (livePrices[`${pairBase}/${pairQuote}`]) return `$${fmtPrice(livePrices[`${pairBase}/${pairQuote}`])}`;
+                    return '—';
+                  })()}
+                  {liveSignalPrice !== undefined && priceSource !== 'synthetic' && (
                     <span title={priceSource === 'pool' ? 'Live price read from the Uniswap v4 pool (slot0) via your RPC' : 'Market ratio from CoinGecko (no usable v4 pool for this pair)'} style={{
                       fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.5px', padding: '3px 7px', borderRadius: '999px',
                       background: priceSource === 'pool' ? 'rgba(56, 239, 125, 0.12)' : 'rgba(168, 85, 247, 0.12)',
@@ -2714,11 +2818,9 @@ function AppContent() {
                 {latestEvent?.decision.action || 'HOLD'}
               </span>
               <span style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)', fontFamily: 'var(--font-mono)' }}>
-                {(liveUsdPrices[pairBase] && liveUsdPrices[pairQuote] && liveUsdPrices[pairQuote] > 0)
-                  ? `$${fmtPrice(liveUsdPrices[pairBase] / liveUsdPrices[pairQuote])}`
-                  : livePrices[`${pairBase}/${pairQuote}`]
-                  ? `$${fmtPrice(livePrices[`${pairBase}/${pairQuote}`])}`
-                  : '—'}
+                {/* Same source as the monitor header + feed: the signal's
+                    server-stamped trigger price. No CoinGecko mixing. */}
+                {liveSignalPrice !== undefined ? `$${fmtPrice(liveSignalPrice)}` : '—'}
               </span>
             </div>
 
@@ -2738,6 +2840,32 @@ function AppContent() {
               </div>
             </div>
 
+            {/* Trade Size Info — shows proposed amount + spend/receive summary */}
+            {latestEvent && signalIsCurrent && latestEvent.decision.action !== 'HOLD' && (() => {
+              const chk = budgetCheckFor(latestEvent.decision, latestEvent.trigger);
+              return (
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '12px 14px', marginBottom: '14px', borderRadius: '10px',
+                  background: chk.ok ? 'rgba(168, 85, 247, 0.08)' : 'rgba(255, 71, 87, 0.10)',
+                  border: `1px solid ${chk.ok ? 'rgba(168, 85, 247, 0.25)' : 'rgba(255, 71, 87, 0.35)'}`,
+                }}>
+                  <div>
+                    <div style={{ fontSize: '0.78rem', fontWeight: 700, color: chk.ok ? 'var(--text-main)' : 'var(--accent-red)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Zap size={13} style={{ color: chk.ok ? 'var(--accent-violet)' : 'var(--accent-red)' }} />
+                      Trade: {chk.summary}
+                    </div>
+                    <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)', marginTop: '3px' }}>
+                      Budget: {chk.cap} {chk.baseSym}{!chk.ok ? ' — amount exceeds budget!' : ''}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '1rem', fontWeight: 800, fontFamily: 'var(--font-mono)', color: chk.ok ? 'var(--accent-violet)' : 'var(--accent-red)' }}>
+                    {latestEvent.decision.suggested_amount_eth} {chk.baseSym}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* AI Reasoning Padded Quote Box */}
             <div style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.06)', padding: '16px', borderRadius: '10px', fontSize: '0.88rem', lineHeight: '1.5', color: 'var(--text-main)', marginBottom: '22px' }}>
               {(latestEvent && signalIsCurrent ? latestEvent.decision.reasoning : '') || `Sell pressure identified at block #${liveBlockNumber || '19845092'}. Performing automatic risk rebalancing to protect capital.`}
@@ -2747,14 +2875,24 @@ function AppContent() {
             {latestEvent && signalIsCurrent && (latestEvent.decision.action === 'BUY' || latestEvent.decision.action === 'SELL') ? (
               <>
                 <button
-                  className={`swap-btn ${txStatus === 'pending' ? 'pending' : ''}`}
+                  className={`swap-btn ${txStatus === 'pending' || txStatus === 'confirming' ? 'pending' : ''}`}
                   onClick={() => handleExecuteUniswapSwap(latestEvent.decision)}
-                  disabled={txStatus === 'pending'}
+                  disabled={txStatus === 'pending' || txStatus === 'confirming' || txStatus === 'success'}
                 >
                   {txStatus === 'pending' ? (
                     <>
                       <div className="btn-spinner" />
                       {txStep === 'approve' ? 'Approving Permit2...' : 'Confirm Swap in Wallet...'}
+                    </>
+                  ) : txStatus === 'confirming' ? (
+                    <>
+                      <div className="btn-spinner" />
+                      Confirming on-chain…
+                    </>
+                  ) : txStatus === 'success' ? (
+                    <>
+                      <CheckCircle2 size={16} />
+                      <span>Swap confirmed — awaiting next signal</span>
                     </>
                   ) : (
                     <span>Confirm Swap · {latestEvent.decision.action === 'BUY' ? `Buy ${pairBase}` : `Sell ${pairBase}`}</span>
@@ -2765,13 +2903,17 @@ function AppContent() {
                 {isSwapInFlight && (
                   <div style={{
                     marginTop: '10px', padding: '10px 14px', borderRadius: '10px',
-                    background: 'rgba(168, 85, 247, 0.10)', border: '1px solid rgba(168, 85, 247, 0.35)',
-                    color: 'var(--accent-violet)', fontSize: '0.78rem', fontWeight: 600,
+                    background: txStatus === 'confirming' ? 'rgba(34, 211, 238, 0.10)' : 'rgba(168, 85, 247, 0.10)',
+                    border: `1px solid ${txStatus === 'confirming' ? 'rgba(34, 211, 238, 0.35)' : 'rgba(168, 85, 247, 0.35)'}`,
+                    color: txStatus === 'confirming' ? 'var(--accent-cyan)' : 'var(--accent-violet)',
+                    fontSize: '0.78rem', fontWeight: 600,
                     display: 'flex', alignItems: 'center', gap: '8px'
                   }}>
-                    <Clock size={14} />
+                    {txStatus === 'confirming' ? <Loader2 size={14} className="spin" /> : <Clock size={14} />}
                     <span>
-                      Transaction in flight — signal locked. New AI signals are queued in the feed until this swap is confirmed or rejected in your wallet.
+                      {txStatus === 'confirming'
+                        ? 'Transaction submitted — waiting for on-chain confirmation. New AI signals are queued until the receipt lands.'
+                        : 'Transaction in flight — signal locked. New AI signals are queued in the feed until this swap is confirmed or rejected in your wallet.'}
                     </span>
                   </div>
                 )}
@@ -2833,15 +2975,18 @@ function AppContent() {
             {/* Banners */}
             {txStatus === 'success' && activeTxHash && (
               <div className="tx-banner tx-banner-success" style={{ marginTop: '12px' }}>
-                <CheckCircle2 size={16} />
-                <span>Transaction sent!</span>
+                <CheckCircle2 size={16} className="tx-check-icon" />
+                <span>Swap confirmed on-chain — agent resumed!</span>
                 <a href={explorerTxUrl(wagmiChainIdNum, activeTxHash)} target="_blank" rel="noopener noreferrer">Explorer ↗</a>
               </div>
             )}
             {txStatus === 'error' && (
               <div className="tx-banner tx-banner-error" style={{ marginTop: '12px' }}>
                 <XCircle size={16} />
-                <span>Transaction rejected or failed.</span>
+                <span>Transaction rejected, reverted, or not confirmed in time.</span>
+                {activeTxHash && (
+                  <a href={explorerTxUrl(wagmiChainIdNum, activeTxHash)} target="_blank" rel="noopener noreferrer">Explorer ↗</a>
+                )}
               </div>
             )}
           </div>
@@ -2855,9 +3000,21 @@ function AppContent() {
                 <TerminalIcon size={18} style={{ color: 'var(--accent-violet)' }} />
                 <h2 style={{ fontSize: '1.05rem', fontWeight: 700 }}>Real-Time Block & Analysis Feed</h2>
               </div>
-              <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                Live Stream
-              </span>
+              {/* While a wallet tx lifecycle is running the agent is locked:
+                  incoming signals queue in this feed until the receipt lands. */}
+              {txStatus === 'pending' ? (
+                <span title="Swap in progress — new AI signals are queued until the transaction resolves" style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.75rem', fontWeight: 600, color: 'var(--accent-amber)', fontFamily: 'var(--font-mono)' }}>
+                  <Loader2 size={13} className="spin" /> Signal paused — confirm in wallet
+                </span>
+              ) : txStatus === 'confirming' ? (
+                <span title="Transaction submitted — waiting for on-chain confirmation; new AI signals are queued" style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.75rem', fontWeight: 600, color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>
+                  <Loader2 size={13} className="spin" /> TX confirming on-chain…
+                </span>
+              ) : (
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                  Live Stream
+                </span>
+              )}
             </div>
 
             <div style={{ flex: 1, background: '#09090b', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '10px', padding: '14px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '580px' }}>

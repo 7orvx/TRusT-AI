@@ -394,6 +394,13 @@ header.glass-panel {
   flex-shrink: 0;
 }
 
+/* Generic spinner for inline status indicators (header/feed 'TX confirming',
+   signal-lock notice while the wallet tx awaits its receipt). */
+.spin {
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
 /* Tabbed Navigation in Settings Modal */
 .modal-tabs {
   display: flex;

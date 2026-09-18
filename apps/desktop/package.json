@@ -1,7 +1,7 @@
 {
   "name": "@trust-ai/desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "TRusT-AI Desktop Shell (Tauri) — spawns the orchestrator + engine sidecars and hosts the dashboard in a native window",
   "scripts": {
     "dev:web": "cd ../../apps/web && npm run dev",

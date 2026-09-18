@@ -1,6 +1,6 @@
 {
   "name": "@trust-ai/server",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "TRusT-AI Backend Orchestrator & AI Gateway (Node.js + TypeScript + WebSocket)",
   "main": "src/index.ts",
   "scripts": {

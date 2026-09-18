@@ -1,6 +1,6 @@
 [package]
 name = "trust-ai-engine"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["TRusT-AI Team"]
 description = "High-performance Rust execution engine for block monitoring, liquidity analysis, and DEX trade execution"

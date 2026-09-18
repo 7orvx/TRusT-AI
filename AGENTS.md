@@ -127,7 +127,7 @@ Getting started:
 
 No lockfiles are committed yet and there is **no git repository initialized**
 (as of writing). Pre-launch checklist: ensure `.gitignore` excludes `.env`, `*.exe`
-and build artifacts (`target/`, `node_modules/`), verify documentation alignment, and run `git init` + create initial tag `v0.1.0-beta`.
+and build artifacts (`target/`, `node_modules/`), verify documentation alignment, and run `git init` + tag `v1.0.0` for the first release.
 
 ---
 
@@ -707,14 +707,22 @@ working notes (original roadmap, product conversations): `docs/internal/`
   client-side recipient patch are gone; the dashboard Route tab is v4-only and
   the execution path uses the shared Permit2 flow for every swap. §10.2
   checklist in `docs/design/uniswap-routing-v3-v4-hooks.md` completed.
-- ✅ **Signal lock during wallet transactions — done** (2026-09-15): clicking
-  Confirm Swap acquires a signal lock (`swapInFlightRef` + `isSwapInFlight`)
-  that freezes the swap card against incoming `NEW_DECISION` events until the
-  tx is confirmed or rejected in the wallet (released in the execution
-  handler's `finally`, so every exit path unlocks). Suppressed decisions still
-  land in the feed and are counted — the card shows a "N newer signals
-  arrived" notice after release. Prevents signing a stale/double signal while
-  the wallet popup is open.
+- ✅ **Signal lock during wallet transactions — done, extended 2026-09-18:**
+  clicking Confirm Swap acquires a signal lock (`swapInFlightRef` +
+  `isSwapInFlight`) that freezes the swap card against incoming `NEW_DECISION`
+  events. Since 2026-09-18 the lock spans the FULL on-chain lifecycle: after
+  `eth_sendTransaction` returns the hash, `txStatus` moves to `confirming` and
+  the handler polls `eth_getTransactionReceipt` (3 s cadence, 180 s timeout) —
+  the lock is only released after the receipt (success/error) or on rejection
+  (released in the `finally`, so every exit path unlocks). Signals arriving
+  during pending/confirming are counted (`skippedSignalCount`) and shown after
+  release; the success banner only appears after on-chain confirmation.
+  UI surfaces: swap button shows 'Confirming on-chain…' (disabled), the feed
+  header swaps 'Live Stream' for 'TX confirming on-chain…', and a cyan notice
+  on the card states that signals are queued. Re-executing an already
+  confirmed signal is blocked (retry after 'error' stays allowed). Prevents
+  signing a stale/double signal while the wallet popup is open — critical on
+  WalletConnect, where the phone returns the hash before the user confirms.
 - ✅ **Dashboard real market data + DEX pair selector — done** (2026-09-11):
   the AI Signal card now uses a DEX-style [Base ▾] ⇅ [Quote ▾] selector
   (preset dropdown removed; Confirm Swap renders only on BUY/SELL), the

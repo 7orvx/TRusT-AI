@@ -65,9 +65,13 @@ open-source DeFi co-pilot.”*
 - [x] **Legacy Uniswap v3 purge (2026-09-15)** — SwapRouter02 encoding, v3/v4
       route selector (UI + server), recipient patch and the v3 router env are
       gone; the codebase is strictly **v4-only**. Permit2 flow is shared.
-- [x] **Signal lock** — while a wallet transaction is in flight the swap card
-      is frozen against new `NEW_DECISION` events (suppressed signals are
-      counted and surfaced), preventing double-signing mid-confirmation.
+- [x] **Signal lock across the full tx lifecycle (2026-09-18)** — the swap
+      card is frozen from signature to on-chain receipt: after submission the
+      UI polls `eth_getTransactionReceipt` (`confirming` state, header + card
+      status surfaces) and queued signals only resume after the receipt lands
+      (success/error), preventing double-signing mid-confirmation — critical
+      on WalletConnect, where the phone returns the hash before the user
+      confirms.
 - [x] Dynamic token/pair management (DEX-style picker + top-100 CoinGecko
       universe) and per-trade budget controls denominated in the pair's base
       token, re-checked at execution.
@@ -90,7 +94,10 @@ open-source DeFi co-pilot.”*
 
 Goal: replace synthetic market data with live on-chain reads from the user's
 validated RPC endpoint, keeping the mUSDC/mUSDT Unichain Sepolia playground as
-the canonical test target.
+the canonical test target. **v1.0.0 milestone:** the pipeline is live and
+E2E-validated on-chain — native-ETH/USDC v4 swaps on Ethereum Sepolia
+(Universal Router 2.1.1) executed with pool-stamped prices, quoter-anchored
+min-out and the full UI confirmation flow (2026-09-18).
 
 - [x] **Real-provider swap data generation (2026-09-15)** — every provider
       path (Gemini, Ollama Cloud, OpenAI, Anthropic, DeepSeek, local Ollama
@@ -102,11 +109,17 @@ the canonical test target.
 - [x] **RPC plug-in + hot-reload** — dashboard-validated provider links reach
       the engine live (`/api/rpc-config`, ~50 s re-check) and drive the V4Quoter
       min-out anchoring (chain-id-guarded candidates).
+- [x] **E2E native-ETH v4 swaps on Sepolia (2026-09-18)** — the public
+      hookless native-ETH/USDC pool (fee 10000 / tick 200) executes real swaps
+      with NO wrap and NO approvals: msg.value carries the input, `SETTLE_ALL`
+      returns ETH to `msg.sender`, `amountOutMinimum` anchored to a live
+      V4Quoter quote. Budget presets + hard caps and a per-signal Trade Size
+      row ship in the same cycle.
 - [x] **Live Pool & Feed Synchronization (on-chain price feed):**
   - [x] **Uniswap v4 pool reads:** extract live `slot0` / `sqrtPriceX96` for
         the active v4 pool (PoolManager `getSlot0(poolId)`) via `poolPrice.ts` over the user's RPC — starting with the user-deployed mUSDC/mUSDT pool on Unichain Sepolia (fee 2500 / tick 25).
   - [x] **Price fallback chain:** transparent fallback chain (`pool` → `coingecko` ratio → `synthetic`).
-  - [x] **Unified dashboard feed:** synchronize the header price monitor, the LLM prompt market context, and decision feed on the exact same live price, with explicit source labels (`pool` / `coingecko` / `synthetic`).
+  - [x] **Unified dashboard feed:** synchronize the header price monitor, the LLM prompt market context, and decision feed on the exact same live price, with explicit source labels (`pool` / `coingecko` / `synthetic`). Completed 2026-09-18: the monitor header and signal card now render the server-stamped trigger price (CoinGecko USD ratios only back the cold start) — the surfaces can no longer diverge on testnets where the faucet quote token has no dollar peg.
 - [ ] **Real on-chain token balances:** replace synthetic balance checks with
         live ERC-20 `balanceOf` reads for base/quote tokens on the connected
         network (chain-aware budget bounds).
@@ -120,6 +133,34 @@ the canonical test target.
 - [ ] **Code signing (Azure Trusted Signing)** — remove the SmartScreen
       “Unknown publisher” warning.
 - [ ] Containerization & cloud deploy (Docker / Vercel / Railway).
+
+---
+
+---
+
+## 🧭 Next Horizons (planned, not started)
+
+Future architecture and UX directions captured for planning.
+
+- **Multi-Agent consensus signals.** Run several LLMs in parallel on the same
+  trigger (e.g. Claude + DeepSeek + Gemini), aggregate their decisions
+  (unanimity, quorum or weighted confidence) and expose the per-agent votes
+  in the UI before emitting one consolidated signal.
+- **Multi-pair & multi-network monitoring.** Watch several pairs on several
+  networks simultaneously (Sepolia, Ethereum, Unichain, Arbitrum, Base,
+  Polygon) with per-pair budgets and a unified signal inbox, instead of one
+  monitored pair at a time.
+- **Cross-chain execution & bridges.** Route a signal's execution to a chain
+  different from the observation chain via bridges/intents; unify balances
+  across networks in the budget model.
+- **UX: transaction/status toasts.** Move tx lifecycle notices, budget
+  warnings and signal-lock banners out from under the swap button into
+  top-of-screen toast/popup components to reduce card clutter (the current
+  inline banners work but stack up: pending → confirming → success).
+- **Uniswap v4 hooks expansion (native).** Beyond hook address + permissions
+  validation: limit orders, dynamic fees and community hook plugins wired
+  into the AI execution pipeline (foundation in
+  `docs/design/uniswap-routing-v3-v4-hooks.md`).
 
 ---
 

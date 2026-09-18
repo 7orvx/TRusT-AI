@@ -1,6 +1,6 @@
 [package]
 name = "trust-ai-desktop"
-version = "0.1.0"
+version = "1.0.0"
 description = "TRusT-AI Desktop Shell — spawns the TS orchestrator and Rust engine sidecars and hosts the dashboard WebView"
 edition = "2021"
 
